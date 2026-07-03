@@ -43,7 +43,9 @@ function isUnlimited(email) { return !!email && String(email).toLowerCase().trim
 // ── DEV OPEN ─────────────────────────────────────────────────────────────────
 // Local testing without the central auth service. Treats every request as this
 // fixed, entitled dev user so the gate + metering never block. OFF in prod.
-const DEV_OPEN  = String(process.env.RECRUIT_DEV_OPEN || '').toLowerCase() === 'true';
+// AUTH REMOVED — app is open: no login wall, no metering, no WinTech-Pay dependency.
+// Forced on so no leftover env can re-enable the gate. (was: env RECRUIT_DEV_OPEN === 'true')
+const DEV_OPEN  = true;
 const DEV_EMAIL = (process.env.RECRUIT_DEV_EMAIL || 'dev@wintechpartners.com').toLowerCase();
 function devUser() { return { id: 'dev', email: DEV_EMAIL, token: 'dev', paid: true, entitlements: {} }; }
 
