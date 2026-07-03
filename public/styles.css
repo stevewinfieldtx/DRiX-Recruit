@@ -132,11 +132,15 @@ button.secondary { background: var(--card2); color: var(--text); border: 1px sol
 .erole { font-size: 11px; font-weight: 800; letter-spacing: .5px; color: var(--brand); }
 .ecount { margin-left: auto; font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; }
 .esum { font-size: 13px; color: var(--muted); padding: 0 14px 6px; margin: 0; }
-.catgroup { padding: 8px 14px 12px; border-top: 1px solid var(--line); }
-.catlabel { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); margin-bottom: 6px; display: flex; align-items: center; gap: 6px; }
-.ccount { font-weight: 700; color: var(--brand); }
-.atom { padding: 7px 0; border-top: 1px dashed var(--line); }
+.catgroup { border-top: 1px solid var(--line); }
+.catgroup > summary { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); padding: 10px 14px; cursor: pointer; list-style: none; display: flex; align-items: center; gap: 6px; }
+.catgroup > summary::-webkit-details-marker { display: none; }
+.catgroup > summary::before { content: "▸"; color: var(--muted); font-size: 10px; }
+.catgroup[open] > summary::before { content: "▾"; }
+.ccount { font-weight: 700; color: var(--brand); margin-left: auto; }
+.atom { padding: 7px 14px; border-top: 1px dashed var(--line); }
 .atom:first-of-type { border-top: none; }
+.catgroup > .atom:last-of-type { padding-bottom: 12px; }
 .atom-claim { font-size: 13px; }
 .atom-tags { display: flex; flex-wrap: wrap; gap: 5px; margin: 5px 0 3px; }
 .chip { font-size: 10px; border-radius: 999px; padding: 2px 8px; border: 1px solid var(--line); color: var(--muted); background: var(--card); text-transform: lowercase; letter-spacing: .2px; }

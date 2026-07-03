@@ -206,8 +206,8 @@ function renderEntityAtoms(data) {
     <summary><span class="erole">${roleLabel}</span> <b>${escapeHtml(data.name || '—')}</b> <span class="ecount">${data.atoms.length} atoms</span></summary>
     ${data.summary ? `<p class="esum">${escapeHtml(data.summary)}</p>` : ''}
     ${Object.entries(groups).map(([cat, atoms]) => `
-      <div class="catgroup">
-        <div class="catlabel">${escapeHtml(prettyCat(cat))} <span class="ccount">${atoms.length}</span></div>
+      <details class="catgroup">
+        <summary class="catlabel">${escapeHtml(prettyCat(cat))} <span class="ccount">${atoms.length}</span></summary>
         ${atoms.map((a) => `
           <div class="atom">
             <div class="atom-claim">${escapeHtml(a.claim || '')}</div>
@@ -218,7 +218,7 @@ function renderEntityAtoms(data) {
             </div>
             ${a.evidence ? `<div class="atom-evi">${escapeHtml(a.evidence)}</div>` : ''}
           </div>`).join('')}
-      </div>`).join('')}`;
+      </details>`).join('')}`;
   $('atomsBody').appendChild(det);
 }
 
