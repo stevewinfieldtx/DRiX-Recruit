@@ -122,3 +122,46 @@ button.secondary { background: var(--card2); color: var(--text); border: 1px sol
 .err-banner { background: rgba(245,101,101,.12); border: 1px solid var(--bad); color: #ffd7d7; padding: 12px 14px; border-radius: 10px; font-size: 14px; }
 .spin { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--line); border-top-color: var(--brand); border-radius: 50%; animation: spin 0.7s linear infinite; vertical-align: -2px; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* Discovered intelligence (tagged atoms) */
+.entity { border: 1px solid var(--line); border-radius: 12px; margin-bottom: 10px; background: var(--card2); overflow: hidden; }
+.entity > summary { cursor: pointer; padding: 12px 14px; font-size: 14px; list-style: none; display: flex; align-items: center; gap: 8px; }
+.entity > summary::-webkit-details-marker { display: none; }
+.entity > summary::before { content: "▸"; color: var(--muted); font-size: 12px; }
+.entity[open] > summary::before { content: "▾"; }
+.erole { font-size: 11px; font-weight: 800; letter-spacing: .5px; color: var(--brand); }
+.ecount { margin-left: auto; font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; }
+.esum { font-size: 13px; color: var(--muted); padding: 0 14px 6px; margin: 0; }
+.catgroup { padding: 8px 14px 12px; border-top: 1px solid var(--line); }
+.catlabel { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); margin-bottom: 6px; display: flex; align-items: center; gap: 6px; }
+.ccount { font-weight: 700; color: var(--brand); }
+.atom { padding: 7px 0; border-top: 1px dashed var(--line); }
+.atom:first-of-type { border-top: none; }
+.atom-claim { font-size: 13px; }
+.atom-tags { display: flex; flex-wrap: wrap; gap: 5px; margin: 5px 0 3px; }
+.chip { font-size: 10px; border-radius: 999px; padding: 2px 8px; border: 1px solid var(--line); color: var(--muted); background: var(--card); text-transform: lowercase; letter-spacing: .2px; }
+.chip.type { color: var(--brand); }
+.chip.conf.high { color: var(--good); }
+.chip.conf.medium { color: var(--warn); }
+.chip.conf.low { color: var(--muted); }
+.atom-evi { font-size: 12px; color: var(--muted); padding-left: 10px; border-left: 2px solid var(--line); margin-top: 2px; }
+
+/* Partner pains */
+.pain-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 620px) { .pain-grid { grid-template-columns: 1fr; } }
+.pain { border: 1px solid var(--line); border-radius: 12px; padding: 14px; background: var(--card2); }
+.pain-title { font-weight: 700; font-size: 15px; margin-bottom: 4px; }
+.pain-why { font-size: 13px; color: var(--muted); }
+.pain-owner { font-size: 13px; font-weight: 600; margin: 8px 0 6px; }
+.pain-forces { display: flex; flex-wrap: wrap; gap: 5px; }
+.chip.urg-bad { color: var(--bad); }
+.chip.urg-warn { color: var(--warn); }
+.chip.urg-muted { color: var(--muted); }
+
+/* Signals + report tools */
+.tool { border-top: 1px solid var(--line); padding: 16px 0; }
+.tool:first-of-type { border-top: none; padding-top: 4px; }
+.tool h3 { margin: 0 0 4px; font-size: 16px; }
+.threadbox { width: 100%; min-height: 110px; padding: 12px 14px; border-radius: 10px; border: 1px solid var(--line); background: var(--card2); color: var(--text); font-size: 13px; font-family: inherit; resize: vertical; margin-bottom: 10px; }
+.threadbox:focus { outline: none; border-color: var(--brand); }
+#signalsResult .kv ul { margin: 4px 0 0; padding-left: 18px; }

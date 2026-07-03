@@ -16,6 +16,7 @@ const db = require('./db');
 const brain = require('drix-brain'); // shared core — scoring/strategies/outreach/coach
 const { recruitIntel, callLLMText } = brain;
 const tde = require('./tde'); // TDE-first ingest (decompose once, cache forever); brain is the fallback
+const recruitExtras = require('./recruit-extras'); // pains + ClearSignals-style thread analysis
 
 const app = express();
 const PORT = process.env.PORT || 3002; // 3001 is DRiX Ready Leads
@@ -214,15 +215,15 @@ app.post('/api/recruit-flow', async (req, res) => {
     // 1) Ingest the three entities.
     send('phase', { phase: 'ingest_vendor', label: 'Reading the vendor…' });
     const vendor = await ingestCached({ url: vendor_url, role: 'vendor', supplementalDocs: docs_vendor });
-    send('atoms', { role: 'vendor', name: vendor.target?.name, count: vendor.atoms.length, summary: vendor.summary });
+    send('atoms', { role: 'vendor', name: vendor.target?.name, count: vendor.atoms.length, summary: vendor.summary, atoms: vendor.atoms });
 
     send('phase', { phase: 'ingest_product', label: 'Reading the product…' });
     const product = await ingestCached({ url: product_url, role: 'product' });
-    send('atoms', { role: 'product', name: product.target?.name, count: product.atoms.length, summary: product.summary });
+    send('atoms', { role: 'product', name: product.target?.name, count: product.atoms.length, summary: product.summary, atoms: product.atoms });
 
     send('phase', { phase: 'ingest_partner', label: 'Reading the partner…' });
     const partner = await ingestCached({ url: partner_url, role: 'partner', supplementalDocs: docs_partner });
-    send('atoms', { role: 'partner', name: partner.target?.name, count: partner.atoms.length, summary: partner.summary });
+    send('atoms', { role: 'partner', name: partner.target?.name, count: partner.atoms.length, summary: partner.summary, atoms: partner.atoms });
 
     // 2) Fit score.
     send('phase', { phase: 'score', label: 'Scoring partner fit…' });
@@ -244,13 +245,19 @@ app.post('/api/recruit-flow', async (req, res) => {
     }));
     send('score', score);
 
+    // 2b) Partner pains — why it is in THIS partner's interest to take the line on.
+    send('phase', { phase: 'pains', label: 'Mapping partner pains…' });
+    const painsOut = await recruitExtras.generatePains({ vendor, product, partner, score })
+      .catch((e) => { console.error('[pains]', e.message); return { pains: [] }; });
+    send('pains', painsOut);
+
     // 3) The gate.
     const passed = score.fit_score >= GATE_THRESHOLD;
     let strategies = null;
 
     if (!passed && !override) {
       send('gate', { passed: false, threshold: GATE_THRESHOLD, fit_score: score.fit_score, verdict: score.verdict, red_flags: score.red_flags || [] });
-      const results = { run_id, ...inputs, vendor, product, partner, score, gate_passed: false, strategies: null };
+      const results = { run_id, ...inputs, vendor, product, partner, score, pains: painsOut.pains, gate_passed: false, strategies: null };
       runStore.set(run_id, results);
       db.saveRun(run_id, inputs, results).catch(e => console.error('[db] saveRun:', e.message));
       send('done', { run_id, fit_score: score.fit_score, gate_passed: false });
@@ -268,7 +275,7 @@ app.post('/api/recruit-flow', async (req, res) => {
     });
     send('strategies', strategies);
 
-    const results = { run_id, ...inputs, vendor, product, partner, score, gate_passed: true, strategies };
+    const results = { run_id, ...inputs, vendor, product, partner, score, pains: painsOut.pains, gate_passed: true, strategies };
     runStore.set(run_id, results);
     db.saveRun(run_id, inputs, results).catch(e => console.error('[db] saveRun:', e.message));
 
@@ -280,6 +287,67 @@ app.post('/api/recruit-flow', async (req, res) => {
     clearInterval(keepAlive); res.end();
   }
 });
+
+// ─── CLEARSIGNALS (recruitment-health read on a partner reply thread) ─────────
+app.post('/api/recruit-signals', async (req, res) => {
+  const { run_id, thread } = req.body || {};
+  if (!run_id || !thread || !String(thread).trim()) return res.status(400).json({ error: 'run_id and thread are required' });
+  try {
+    const run = await getRunOrRehydrate(run_id);
+    if (!run) return res.status(404).json({ error: 'Run not found' });
+    const context = buildCoachContext(run); // same grounding the coach uses
+    const signals = await recruitExtras.analyzeSignals({ context, thread });
+    res.json({ ok: true, signals });
+  } catch (e) { console.error('[recruit-signals]', e.message); res.status(500).json({ error: e.message }); }
+});
+
+// ─── FULL REPORT (opens in Word or any browser) ──────────────────────────────
+app.get('/api/recruit-report/:run_id', async (req, res) => {
+  try {
+    const run = await getRunOrRehydrate(req.params.run_id);
+    if (!run) return res.status(404).send('Run not found');
+    const partner = (run.partner?.target?.name || 'partner').replace(/[^a-z0-9]+/gi, '-');
+    res.set('Content-Type', 'application/msword');
+    res.set('Content-Disposition', `attachment; filename="DRiX-Recruit-${partner}.doc"`);
+    res.send(buildReportHtml(run));
+  } catch (e) { console.error('[recruit-report]', e.message); res.status(500).send(e.message); }
+});
+
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
+
+function buildReportHtml(run) {
+  const p = run.partner || {}, pr = run.product || {}, v = run.vendor || {}, s = run.score || {};
+  const strategies = (run.strategies && run.strategies.strategies) || [];
+  const pains = run.pains || [];
+  const entityAtoms = (e, label) => {
+    const atoms = (e && e.atoms) || [];
+    if (!atoms.length) return '';
+    const groups = {};
+    for (const a of atoms) { const c = a.category || 'other'; (groups[c] = groups[c] || []).push(a); }
+    return `<h3>${esc(label)} — ${esc(e.target?.name || '')} (${atoms.length} atoms)</h3>` +
+      Object.entries(groups).map(([cat, as]) => `<p><b>${esc(cat.replace(/_/g, ' '))}</b></p><ul>` +
+        as.map((a) => `<li>${esc(a.claim)} <i>[${esc(a.type || '')}${a.confidence ? ', ' + esc(a.confidence) : ''}]</i></li>`).join('') + `</ul>`).join('');
+  };
+  const subs = (s.subscores || []).map((ss) => `<li>${esc(ss.name || ss.key)}: ${ss.score}/100 (w ${ss.weight}) — ${esc(ss.rationale || '')}</li>`).join('');
+  const painRows = pains.map((pn) => `<tr><td><b>${esc(pn.title)}</b><br>${esc(pn.why || '')}</td><td>${esc(pn.owner_role || '')}</td><td>urgency: ${esc(pn.urgency || '')}<br>pull: ${esc(pn.pull || '')}<br>inertia: ${esc(pn.inertia || '')}</td></tr>`).join('');
+  const stratBlocks = strategies.map((st) => `<h3>${esc(st.title || '')} (confidence ${st.confidence})</h3><p>${esc(st.approach || '')}</p><p><i>Why this partner:</i> ${esc(st.rationale || '')}</p><p><i>Aim at:</i> ${esc(st.target_role || '')}</p>`).join('');
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>DRiX Recruit Report</title></head>
+<body style="font-family:Calibri,Arial,sans-serif;max-width:800px;margin:auto;color:#111;line-height:1.5">
+<h1>DRiX Recruit — Partner Fit Report</h1>
+<p><b>Vendor:</b> ${esc(v.target?.name || run.vendor_url || '')} &nbsp;·&nbsp; <b>Product:</b> ${esc(pr.target?.name || run.product_url || '')} &nbsp;·&nbsp; <b>Partner:</b> ${esc(p.target?.name || run.partner_url || '')}</p>
+<h2>Fit score: ${s.fit_score || 0}/100 — ${esc(s.verdict || '')}</h2>
+<p>${esc(s.summary || '')}</p>
+<ul>${subs}</ul>
+${s.readiness_score != null ? `<p><b>Readiness (timing):</b> ${s.readiness_score}/100${s.readiness && s.readiness.signals && s.readiness.signals.length ? ' — ' + esc(s.readiness.signals.join('; ')) : ''}</p>` : ''}
+${pains.length ? `<h2>Partner pains</h2><table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;width:100%"><tr><th align="left">Pain</th><th align="left">Owner</th><th align="left">Forces</th></tr>${painRows}</table>` : ''}
+${strategies.length ? `<h2>Recruitment strategies</h2>${stratBlocks}` : ''}
+<h2>Discovered intelligence</h2>
+${entityAtoms(p, 'PARTNER')}
+${entityAtoms(pr, 'PRODUCT')}
+${entityAtoms(v, 'VENDOR')}
+<hr><p style="color:#888;font-size:12px">Generated by DRiX Recruit.</p>
+</body></html>`;
+}
 
 // ─── OUTREACH KIT (on strategy selection) ────────────────────────────────────
 app.post('/api/recruit-outreach', async (req, res) => {

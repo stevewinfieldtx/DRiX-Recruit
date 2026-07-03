@@ -57,7 +57,10 @@ async function runFlow(override) {
 
   state.lastInputs = { vendor_url, product_url, partner_url };
   // Reset downstream cards
-  ['scoreCard', 'stratCard', 'outreachCard', 'coachCard'].forEach((id) => { $(id).hidden = true; $(id).innerHTML = id === 'stratCard' ? $(id).innerHTML : ''; });
+  ['scoreCard', 'painsCard', 'atomsCard', 'stratCard', 'outreachCard', 'coachCard'].forEach((id) => { $(id).hidden = true; $(id).innerHTML = id === 'stratCard' ? $(id).innerHTML : ''; });
+  $('toolsCard').hidden = true;
+  if ($('signalsResult')) $('signalsResult').innerHTML = '';
+  if ($('threadInput')) $('threadInput').value = '';
   $('stratList') && ($('stratList').innerHTML = '');
   $('progressCard').hidden = false;
   $('logList').innerHTML = '';
@@ -121,6 +124,7 @@ function handleEvent(event, data) {
       const li = document.createElement('li');
       li.textContent = `${cap(data.role)}: ${data.name || '—'} — ${data.count} facts extracted`;
       $('logList').appendChild(li);
+      renderEntityAtoms(data);
       break;
     }
     case 'score':
@@ -132,9 +136,14 @@ function handleEvent(event, data) {
     case 'strategies':
       renderStrategies(data);
       break;
+    case 'pains':
+      renderPains(data);
+      break;
     case 'done':
       state.runId = data.run_id;
       $('phaseLabel').innerHTML = `Done · fit ${data.fit_score}/100`;
+      $('toolsCard').hidden = false;
+      wireTools();
       break;
     case 'error':
       $('phaseLabel').innerHTML = `<span style="color:var(--bad)">Error: ${escapeHtml(data.error)}</span>`;
@@ -174,6 +183,45 @@ function renderScore(s) {
     </div>`;
 }
 
+// ─── RENDER: DISCOVERED ATOMS (tagged) ───────────────────────────────────────
+function prettyCat(s) { return String(s || 'other').replace(/_/g, ' '); }
+
+function renderEntityAtoms(data) {
+  if (!data.atoms || !data.atoms.length) return;
+  const card = $('atomsCard');
+  if (card.hidden || !$('atomsBody')) {
+    card.hidden = false;
+    card.innerHTML = `
+      <h2>Discovered intelligence</h2>
+      <p class="sub">Every fact DRiX pulled from the three entities, tagged by the recruit lens. The score, strategies, and outreach are all built on these atoms.</p>
+      <div id="atomsBody"></div>`;
+  }
+  const groups = {};
+  for (const a of data.atoms) { const c = a.category || 'other'; (groups[c] = groups[c] || []).push(a); }
+  const roleLabel = ({ vendor: 'VENDOR', product: 'PRODUCT', partner: 'PARTNER' })[data.role] || cap(data.role);
+  const det = document.createElement('details');
+  det.className = 'entity';
+  if (data.role === 'partner') det.open = true;
+  det.innerHTML = `
+    <summary><span class="erole">${roleLabel}</span> <b>${escapeHtml(data.name || '—')}</b> <span class="ecount">${data.atoms.length} atoms</span></summary>
+    ${data.summary ? `<p class="esum">${escapeHtml(data.summary)}</p>` : ''}
+    ${Object.entries(groups).map(([cat, atoms]) => `
+      <div class="catgroup">
+        <div class="catlabel">${escapeHtml(prettyCat(cat))} <span class="ccount">${atoms.length}</span></div>
+        ${atoms.map((a) => `
+          <div class="atom">
+            <div class="atom-claim">${escapeHtml(a.claim || '')}</div>
+            <div class="atom-tags">
+              <span class="chip type">${escapeHtml(a.type || 'atom')}</span>
+              ${a.confidence ? `<span class="chip conf ${escapeHtml(String(a.confidence).toLowerCase())}">${escapeHtml(a.confidence)}</span>` : ''}
+              ${(a.tags || []).slice(0, 4).map((t) => `<span class="chip tag">${escapeHtml(t)}</span>`).join('')}
+            </div>
+            ${a.evidence ? `<div class="atom-evi">${escapeHtml(a.evidence)}</div>` : ''}
+          </div>`).join('')}
+      </div>`).join('')}`;
+  $('atomsBody').appendChild(det);
+}
+
 // ─── RENDER: GATE ────────────────────────────────────────────────────────────
 function renderGate(g) {
   if (g.passed) return; // score passed (or overridden) → strategies stream next
@@ -207,6 +255,69 @@ function renderStrategies(data) {
     el.querySelector('button').addEventListener('click', () => selectStrategy(s.id));
     list.appendChild(el);
   }
+}
+
+// ─── RENDER: PAINS ───────────────────────────────────────────────────────────
+function renderPains(data) {
+  const pains = (data && data.pains) || [];
+  if (!pains.length) return;
+  const card = $('painsCard');
+  card.hidden = false;
+  const urg = (u) => ({ high: 'urg-bad', medium: 'urg-warn', low: 'urg-muted' }[String(u || '').toLowerCase()] || 'urg-muted');
+  card.innerHTML = `
+    <h2>Partner pains</h2>
+    <p class="sub">Why it's in this partner's own interest to take the line on — the recruitment angle.</p>
+    <div class="pain-grid">
+      ${pains.map((p) => `
+        <div class="pain">
+          <div class="pain-title">${escapeHtml(p.title || '')}</div>
+          <div class="pain-why">${escapeHtml(p.why || '')}</div>
+          ${p.evidence ? `<div class="atom-evi">${escapeHtml(p.evidence)}</div>` : ''}
+          <div class="pain-owner">${escapeHtml(p.owner_role || '')}</div>
+          <div class="pain-forces">
+            <span class="chip ${urg(p.urgency)}">urgency: ${escapeHtml(p.urgency || '')}</span>
+            <span class="chip">pull: ${escapeHtml(p.pull || '')}</span>
+            <span class="chip">inertia: ${escapeHtml(p.inertia || '')}</span>
+          </div>
+        </div>`).join('')}
+    </div>`;
+}
+
+// ─── SIGNALS + REPORT TOOLS ──────────────────────────────────────────────────
+function wireTools() {
+  const ab = $('analyzeBtn');
+  if (ab && !ab.dataset.wired) { ab.dataset.wired = '1'; ab.addEventListener('click', analyzeThread); }
+  const rb = $('reportBtn');
+  if (rb && !rb.dataset.wired) { rb.dataset.wired = '1'; rb.addEventListener('click', () => { if (state.runId) window.open(`/api/recruit-report/${state.runId}`, '_blank'); }); }
+}
+async function analyzeThread() {
+  const thread = $('threadInput').value.trim();
+  if (!thread || !state.runId) { alert('Paste the reply thread first.'); return; }
+  const btn = $('analyzeBtn'); btn.disabled = true; btn.textContent = 'Analyzing…';
+  $('signalsResult').innerHTML = '<div class="phase"><span class="spin"></span> Reading the thread…</div>';
+  try {
+    const r = await fetch('/api/recruit-signals', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+      body: JSON.stringify({ run_id: state.runId, thread }),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'failed');
+    renderSignals(d.signals);
+  } catch (e) { $('signalsResult').innerHTML = `<div class="err-banner">${escapeHtml(e.message)}</div>`; }
+  finally { btn.disabled = false; btn.textContent = 'Analyze thread'; }
+}
+function renderSignals(sg) {
+  sg = sg || {};
+  const col = scoreColor(sg.health_score || 0);
+  $('signalsResult').innerHTML = `
+    <div class="scorehead" style="margin-top:14px">
+      <div class="scorering" style="width:64px;height:64px;font-size:20px;border:5px solid ${col};color:${col}">${sg.health_score || 0}</div>
+      <div class="verdict" style="font-size:15px">${escapeHtml(sg.verdict || '')}</div>
+    </div>
+    ${(sg.positive_signals || []).length ? `<div class="kv"><b>Positive signals</b><ul>${sg.positive_signals.map((x) => `<li>${escapeHtml(x)}</li>`).join('')}</ul></div>` : ''}
+    ${(sg.risks || []).length ? `<div class="kv"><b>Risks</b><ul>${sg.risks.map((x) => `<li>${escapeHtml(x)}</li>`).join('')}</ul></div>` : ''}
+    ${(sg.objections || []).length ? `<div class="kv"><b>Objections</b>${sg.objections.map((o) => `<div class="evi">"${escapeHtml(o.objection || '')}" → ${escapeHtml(o.response || '')}</div>`).join('')}</div>` : ''}
+    <div class="kv" style="margin-top:8px"><b>Next step:</b> ${escapeHtml(sg.next_step || '')}</div>`;
 }
 
 // ─── SELECT STRATEGY → OUTREACH ──────────────────────────────────────────────

@@ -58,6 +58,12 @@
     <!-- SCORE + GATE -->
     <section id="scoreCard" class="card" hidden></section>
 
+    <!-- PARTNER PAINS -->
+    <section id="painsCard" class="card" hidden></section>
+
+    <!-- DISCOVERED INTELLIGENCE (tagged atoms) -->
+    <section id="atomsCard" class="card" hidden></section>
+
     <!-- STRATEGIES -->
     <section id="stratCard" class="card" hidden>
       <h2>Recruitment strategies</h2>
@@ -67,6 +73,23 @@
 
     <!-- OUTREACH -->
     <section id="outreachCard" class="card" hidden></section>
+
+    <!-- SIGNALS + REPORT -->
+    <section id="toolsCard" class="card" hidden>
+      <h2>Signals &amp; report</h2>
+      <div class="tool">
+        <h3>ClearSignals — thread analyzer</h3>
+        <p class="sub" style="margin-bottom:8px">Paste the partner's reply thread for a recruitment-health read and the next move.</p>
+        <textarea id="threadInput" class="threadbox" placeholder="Paste the email / reply thread from the partner…"></textarea>
+        <button id="analyzeBtn" class="secondary">Analyze thread</button>
+        <div id="signalsResult"></div>
+      </div>
+      <div class="tool">
+        <h3>Full report</h3>
+        <p class="sub" style="margin-bottom:8px">Atoms, pains, score, strategies, and outreach — opens in Word or any browser.</p>
+        <button id="reportBtn" class="secondary">Download report</button>
+      </div>
+    </section>
 
     <!-- COACH (chat + voice) -->
     <section id="coachCard" class="card" hidden>
