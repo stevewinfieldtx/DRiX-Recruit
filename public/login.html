@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DRiX Recruit — Sign in</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="topbar"><div class="brand">DRiX <span>Recruit</span></div></header>
+  <main class="wrap" style="max-width:420px">
+    <section class="card">
+      <h1 id="title">Sign in</h1>
+      <p class="sub">Use your business email. Personal Gmail/Yahoo/Outlook are not accepted.</p>
+      <div id="err" class="err-banner" hidden></div>
+      <form id="authform" class="authform">
+        <label class="field"><span>Business email</span><input id="email" type="email" required placeholder="you@company.com" /></label>
+        <label class="field"><span>Password</span><input id="password" type="password" required placeholder="••••••••" /></label>
+        <button class="primary" type="submit" id="submitBtn" style="width:100%">Sign in</button>
+      </form>
+      <p class="sub" style="margin-top:14px">
+        <span id="toggleText">No account?</span>
+        <button class="linkbtn" id="toggle" style="color:var(--brand)">Create one</button>
+      </p>
+    </section>
+  </main>
+  <script>
+    let mode = 'login';
+    const $ = (id) => document.getElementById(id);
+    function setMode(m) {
+      mode = m;
+      $('title').textContent = m === 'login' ? 'Sign in' : 'Create account';
+      $('submitBtn').textContent = m === 'login' ? 'Sign in' : 'Create account';
+      $('toggleText').textContent = m === 'login' ? 'No account?' : 'Already have an account?';
+      $('toggle').textContent = m === 'login' ? 'Create one' : 'Sign in';
+    }
+    $('toggle').addEventListener('click', () => setMode(mode === 'login' ? 'signup' : 'login'));
+    $('authform').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      $('err').hidden = true;
+      const email = $('email').value.trim(), password = $('password').value;
+      const path = mode === 'login' ? '/api/auth/login' : '/api/auth/signup';
+      try {
+        const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify({ email, password }) });
+        const d = await r.json();
+        if (!r.ok) { $('err').textContent = d.error || 'Failed'; $('err').hidden = false; if (d.code === 'ACCOUNT_EXISTS') setMode('login'); return; }
+        location.href = '/';
+      } catch (err) { $('err').textContent = err.message; $('err').hidden = false; }
+    });
+  </script>
+</body>
+</html>

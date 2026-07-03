@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DRiX Recruit</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">DRiX <span>Recruit</span></div>
+    <div class="right">
+      <span id="runsBadge" class="badge" title="Runs remaining"></span>
+      <button id="logoutBtn" class="linkbtn" hidden>Sign out</button>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <!-- STEP 1: INPUTS -->
+    <section id="inputCard" class="card">
+      <h1>Should you recruit this partner?</h1>
+      <p class="sub">Score a reseller for a vendor's partner program — focused on one product — then get five defended strategies and a full outreach kit.</p>
+
+      <label class="field">
+        <span>Vendor URL <em>the partner program you're recruiting into</em></span>
+        <input id="vendorUrl" type="url" placeholder="https://vendor.com" />
+      </label>
+      <div class="uploads" id="vendorDocs" data-bucket="vendor">
+        <button type="button" class="upload-btn">+ Add vendor material (PDF / Word / PPTX / TXT)</button>
+        <input type="file" accept=".pdf,.docx,.pptx,.txt" multiple hidden />
+        <ul class="doclist"></ul>
+      </div>
+
+      <label class="field">
+        <span>Product URL <em>the specific technology you want them to sell</em></span>
+        <input id="productUrl" type="url" placeholder="https://vendor.com/product" />
+      </label>
+
+      <label class="field">
+        <span>Partner URL <em>the reseller you're evaluating</em></span>
+        <input id="partnerUrl" type="url" placeholder="https://reseller.com" />
+      </label>
+      <div class="uploads" id="partnerDocs" data-bucket="partner">
+        <button type="button" class="upload-btn">+ Add partner material (PDF / Word / PPTX / TXT)</button>
+        <input type="file" accept=".pdf,.docx,.pptx,.txt" multiple hidden />
+        <ul class="doclist"></ul>
+      </div>
+
+      <button id="runBtn" class="primary">Analyze fit →</button>
+    </section>
+
+    <!-- PROGRESS -->
+    <section id="progressCard" class="card" hidden>
+      <div class="phase" id="phaseLabel">Working…</div>
+      <ul class="loglist" id="logList"></ul>
+    </section>
+
+    <!-- SCORE + GATE -->
+    <section id="scoreCard" class="card" hidden></section>
+
+    <!-- STRATEGIES -->
+    <section id="stratCard" class="card" hidden>
+      <h2>Recruitment strategies</h2>
+      <p class="sub">Pick one to generate the outreach kit.</p>
+      <div id="stratList" class="strat-grid"></div>
+    </section>
+
+    <!-- OUTREACH -->
+    <section id="outreachCard" class="card" hidden></section>
+
+    <!-- COACH (chat + voice) -->
+    <section id="coachCard" class="card" hidden>
+      <h2>Coach</h2>
+      <p class="sub">Chat and voice share one memory — each knows what was said in the other.</p>
+      <div class="coach-actions">
+        <button id="voiceBtn" class="secondary">🎙 Start voice coach</button>
+      </div>
+      <div id="voiceMount"></div>
+      <div id="chatLog" class="chatlog"></div>
+      <form id="chatForm" class="chatform">
+        <input id="chatInput" placeholder="Ask the coach anything about this partner…" autocomplete="off" />
+        <button class="primary" type="submit">Send</button>
+      </form>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+{
+  "name": "drix-auth",
+  "version": "0.2.0",
+  "description": "DRiX identity client for the central auth + billing service (WinTech-Pay). Thin fetch client — no DB, no Stripe. Stores the session in an httpOnly cookie and validates via /v1/me.",
+  "main": "index.js",
+  "license": "UNLICENSED",
+  "private": true
+}

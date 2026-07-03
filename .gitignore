@@ -1,0 +1,46 @@
+# ── DRiX Recruit — .gitignore ─────────────────────────────────────────────────
+
+# Dependencies (reinstalled from package-lock.json)
+node_modules/
+
+# Environment / secrets — NEVER commit real keys. The template IS committed.
+.env
+.env.*
+!.env.example
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Uploads / runtime temp (multer scratch, generated files)
+uploads/
+tmp/
+temp/
+*.tmp
+
+# Local databases (in-memory / SQLite fallback when DATABASE_URL is blank)
+data/
+*.sqlite
+*.sqlite3
+*.db
+
+# OS cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Build / coverage
+dist/
+build/
+coverage/
+.cache/
