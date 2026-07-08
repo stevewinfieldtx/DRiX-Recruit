@@ -697,8 +697,11 @@ function renderTriageRows() {
 
 function renderWinners() {
   const rows = [...winnerRows].sort((a, b) => (b.fit_score ?? -1) - (a.fit_score ?? -1));
-  const links = rows.filter((w) => w.run_id).map((w) => `${location.origin}/?run=${w.run_id}`);
-  $('winnersActions').innerHTML = links.length ? `<button class="secondary" id="copyLinksBtn">Copy all ${links.length} live links</button>` : '';
+  const ids = rows.filter((w) => w.run_id).map((w) => w.run_id);
+  const links = ids.map((id) => `${location.origin}/?run=${id}`);
+  $('winnersActions').innerHTML = ids.length
+    ? `<button class="secondary" id="copyLinksBtn">Copy all ${ids.length} live links</button> <button class="secondary" id="combinedReportBtn">Download combined report</button>`
+    : '';
   $('winnersRows').innerHTML = rows.map((w, i) => {
     if (w.error) return `<tr class="batch-err"><td>${i + 1}</td><td>${escapeHtml(w.name || w.url)}</td><td>${w.triage_score ?? ''}</td><td>—</td><td>Failed: ${escapeHtml(w.error)}</td></tr>`;
     const col = w.fit_score >= 75 ? 'var(--good)' : w.fit_score >= 60 ? 'var(--brand)' : 'var(--warn)';
@@ -707,6 +710,8 @@ function renderWinners() {
   }).join('');
   const cb = $('copyLinksBtn');
   if (cb) cb.addEventListener('click', () => { navigator.clipboard.writeText(links.join('\n')); cb.textContent = 'Copied'; setTimeout(() => (cb.textContent = `Copy all ${links.length} live links`), 1200); });
+  const rb = $('combinedReportBtn');
+  if (rb) rb.addEventListener('click', () => window.open('/api/recruit-report-batch?ids=' + encodeURIComponent(ids.join(',')), '_blank'));
 }
 
 boot();
