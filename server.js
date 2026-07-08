@@ -166,6 +166,66 @@ async function extractPptxText(buffer) {
   return texts.join('\n\n');
 }
 
+// Parse an .xlsx as a TABLE and pull PARTNER website URLs: find the website/domain
+// column by its header (never the social columns), normalize bare domains to
+// https://, and drop social + email + schema noise. Falls back to domain-like
+// cells only if no website header is found. Returns newline-joined URLs.
+const SOCIAL_HOST = /(?:^|\.)(?:twitter\.com|x\.com|facebook\.com|fb\.com|linkedin\.com|instagram\.com|youtube\.com|tiktok\.com|pinterest\.com|t\.co)(?:[\/:?]|$)/i;
+function xlsxDecode(s) {
+  return String(s).replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#3?9;|&apos;/g, "'");
+}
+function colIdx(ref) { const m = /^([A-Z]+)/.exec(ref); let n = 0; for (const ch of (m ? m[1] : 'A')) n = n * 26 + (ch.charCodeAt(0) - 64); return n - 1; }
+function normSite(v) {
+  let s = String(v || '').trim().replace(/^https?:\/\//i, '').replace(/^\/+/, '');
+  if (!s || s.includes('@') || /\s/.test(s)) return null;   // skip emails / multi-word junk
+  if (!/^[\w-]+(\.[\w-]+)+/.test(s)) return null;           // must look like a domain
+  if (SOCIAL_HOST.test(s)) return null;                     // drop social hosts
+  return 'https://' + s.replace(/\/+$/, '');
+}
+async function extractXlsxText(buffer) {
+  const dir = await unzipper.Open.buffer(buffer);
+  // shared strings table
+  const ss = [];
+  const ssFile = dir.files.find(f => /xl\/sharedStrings\.xml$/i.test(f.path));
+  if (ssFile) {
+    const c = (await ssFile.buffer()).toString('utf-8');
+    for (const si of (c.match(/<si>[\s\S]*?<\/si>/g) || [])) {
+      const runs = si.match(/<t[^>]*>([\s\S]*?)<\/t>/g) || [];
+      ss.push(xlsxDecode(runs.map(t => t.replace(/<[^>]+>/g, '')).join('')));
+    }
+  }
+  // first worksheet → rows of { colIndex: value }
+  const sheetFile = dir.files.filter(f => /xl\/worksheets\/sheet\d+\.xml$/i.test(f.path)).sort((a, b) => a.path.localeCompare(b.path))[0];
+  if (!sheetFile) return '';
+  const sheet = (await sheetFile.buffer()).toString('utf-8');
+  const rows = [];
+  for (const rowXml of (sheet.match(/<row[^>]*>[\s\S]*?<\/row>/g) || [])) {
+    const cells = {};
+    for (const c of (rowXml.match(/<c\b[^>]*?(?:\/>|>[\s\S]*?<\/c>)/g) || [])) {
+      const ref = (/r="([A-Z]+)\d+"/.exec(c) || [])[1];
+      if (!ref) continue;
+      const t = (/t="([^"]+)"/.exec(c) || [])[1] || 'n';
+      let val = '';
+      if (t === 's') { const vi = (/<v>(\d+)<\/v>/.exec(c) || [])[1]; val = ss[parseInt(vi, 10)] || ''; }
+      else if (t === 'inlineStr') { val = xlsxDecode((/<t[^>]*>([\s\S]*?)<\/t>/.exec(c) || [])[1] || ''); }
+      else { val = xlsxDecode((/<v>([\s\S]*?)<\/v>/.exec(c) || [])[1] || ''); }
+      cells[colIdx(ref)] = val;
+    }
+    rows.push(cells);
+  }
+  if (!rows.length) return '';
+  // header row → website column(s): match web/site/domain/url, never social columns
+  const header = rows[0];
+  const siteCols = Object.keys(header).map(Number).filter(ci => {
+    const h = String(header[ci] || '');
+    return /web\s*site|homepage|domain|\burl\b|\bwww\b|\bsite\b/i.test(h) && !/social|twitter|facebook|linked|instagram|youtube|tiktok/i.test(h);
+  });
+  const urls = [];
+  const source = siteCols.length ? rows.slice(1).flatMap(r => siteCols.map(ci => r[ci])) : rows.slice(1).flatMap(r => Object.values(r));
+  for (const v of source) { const u = normSite(v); if (u) urls.push(u); }
+  return [...new Set(urls)].join('\n');
+}
+
 app.post('/api/upload-doc', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file provided' });
@@ -175,6 +235,8 @@ app.post('/api/upload-doc', upload.single('file'), async (req, res) => {
     else if (ext === '.pdf') text = (await pdfParse(req.file.buffer)).text || '';
     else if (ext === '.docx') text = (await mammoth.extractRawText({ buffer: req.file.buffer })).value || '';
     else if (ext === '.pptx') text = await extractPptxText(req.file.buffer);
+    else if (ext === '.xlsx') text = await extractXlsxText(req.file.buffer);
+    else if (ext === '.csv')  text = req.file.buffer.toString('utf-8');
     else return res.status(400).json({ error: `Cannot extract text from ${ext} files` });
     text = text.trim().slice(0, 100000);
     res.json({ ok: true, filename: req.file.originalname, size: req.file.size, chars: text.length, text });
@@ -313,9 +375,24 @@ app.get('/api/recruit-report/:run_id', async (req, res) => {
   } catch (e) { console.error('[recruit-report]', e.message); res.status(500).send(e.message); }
 });
 
+// Combined report for a set of runs (the triage winners): /api/recruit-report-batch?ids=r1,r2,…
+app.get('/api/recruit-report-batch', async (req, res) => {
+  const ids = String(req.query.ids || '').split(',').map(s => s.trim()).filter(Boolean).slice(0, 100);
+  if (!ids.length) return res.status(400).send('Require ?ids=run1,run2,…');
+  try {
+    const runs = [];
+    for (const id of ids) { const r = await getRunOrRehydrate(id); if (r) runs.push(r); }
+    if (!runs.length) return res.status(404).send('No runs found');
+    res.set('Content-Type', 'application/msword');
+    res.set('Content-Disposition', `attachment; filename="DRiX-Recruit-${runs.length}-partners.doc"`);
+    res.send(buildCombinedReportHtml(runs));
+  } catch (e) { console.error('[recruit-report-batch]', e.message); res.status(500).send(e.message); }
+});
+
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
 
-function buildReportHtml(run) {
+// One partner's report content (no <html> wrapper) — reused by single + combined.
+function buildReportSection(run) {
   const p = run.partner || {}, pr = run.product || {}, v = run.vendor || {}, s = run.score || {};
   const strategies = (run.strategies && run.strategies.strategies) || [];
   const pains = run.pains || [];
@@ -331,9 +408,7 @@ function buildReportHtml(run) {
   const subs = (s.subscores || []).map((ss) => `<li>${esc(ss.name || ss.key)}: ${ss.score}/100 (w ${ss.weight}) — ${esc(ss.rationale || '')}</li>`).join('');
   const painRows = pains.map((pn) => `<tr><td><b>${esc(pn.title)}</b><br>${esc(pn.why || '')}</td><td>${esc(pn.owner_role || '')}</td><td>urgency: ${esc(pn.urgency || '')}<br>pull: ${esc(pn.pull || '')}<br>inertia: ${esc(pn.inertia || '')}</td></tr>`).join('');
   const stratBlocks = strategies.map((st) => `<h3>${esc(st.title || '')} (confidence ${st.confidence})</h3><p>${esc(st.approach || '')}</p><p><i>Why this partner:</i> ${esc(st.rationale || '')}</p><p><i>Aim at:</i> ${esc(st.target_role || '')}</p>`).join('');
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>DRiX Recruit Report</title></head>
-<body style="font-family:Calibri,Arial,sans-serif;max-width:800px;margin:auto;color:#111;line-height:1.5">
-<h1>DRiX Recruit — Partner Fit Report</h1>
+  return `<h1>DRiX Recruit — Partner Fit Report</h1>
 <p><b>Vendor:</b> ${esc(v.target?.name || run.vendor_url || '')} &nbsp;·&nbsp; <b>Product:</b> ${esc(pr.target?.name || run.product_url || '')} &nbsp;·&nbsp; <b>Partner:</b> ${esc(p.target?.name || run.partner_url || '')}</p>
 <h2>Fit score: ${s.fit_score || 0}/100 — ${esc(s.verdict || '')}</h2>
 <p>${esc(s.summary || '')}</p>
@@ -344,10 +419,238 @@ ${strategies.length ? `<h2>Recruitment strategies</h2>${stratBlocks}` : ''}
 <h2>Discovered intelligence</h2>
 ${entityAtoms(p, 'PARTNER')}
 ${entityAtoms(pr, 'PRODUCT')}
-${entityAtoms(v, 'VENDOR')}
+${entityAtoms(v, 'VENDOR')}`;
+}
+
+function reportShell(title, inner) {
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${esc(title)}</title></head>
+<body style="font-family:Calibri,Arial,sans-serif;max-width:800px;margin:auto;color:#111;line-height:1.5">
+${inner}
 <hr><p style="color:#888;font-size:12px">Generated by DRiX Recruit.</p>
 </body></html>`;
 }
+
+function buildReportHtml(run) { return reportShell('DRiX Recruit Report', buildReportSection(run)); }
+
+// Combined report: every winner stacked into one document (page-break between).
+function buildCombinedReportHtml(runs) {
+  const inner = `<h1 style="font-size:26px">DRiX Recruit — ${runs.length}-partner report</h1>`
+    + runs.map((r, i) => (i ? '<div style="page-break-before:always"></div>' : '') + buildReportSection(r)).join('\n<hr>\n');
+  return reportShell(`DRiX Recruit — ${runs.length} partners`, inner);
+}
+
+// ─── BATCH QUICK-PULL (SSE) — score many partners vs ONE vendor+product ──────
+// Triage a list: ingest vendor+product once, then ingest+score each partner and
+// stream a ranked row per partner. No strategies/outreach — that's the deep-dive
+// you run on the winners (single flow, which reuses the cached ingest).
+app.post('/api/recruit-batch', async (req, res) => {
+  const { vendor_url, product_url, partner_urls, docs_vendor } = req.body || {};
+  if (!vendor_url)  return res.status(400).json({ error: 'Require vendor_url' });
+  if (!product_url) return res.status(400).json({ error: 'Require product_url' });
+  const cleaned = Array.isArray(partner_urls)
+    ? [...new Set(partner_urls.map(u => String(u || '').trim()).filter(Boolean))]
+    : [];
+  if (!cleaned.length) return res.status(400).json({ error: 'Require at least one partner URL' });
+  if (!OPENROUTER_API_KEY || !OPENROUTER_MODEL_ID) {
+    return res.status(500).json({ error: 'Server not configured — set OPENROUTER_API_KEY and OPENROUTER_MODEL_ID' });
+  }
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+  const keepAlive = setInterval(() => { try { res.write(':keepalive\n\n'); } catch {} }, 15000);
+  const send = (event, data) => { try { res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } catch {} };
+
+  send('start', { total: cleaned.length });
+  try {
+    // Vendor + product are ingested ONCE and reused for every partner.
+    send('phase', { label: 'Reading vendor + product…' });
+    const [vendor, product] = await Promise.all([
+      ingestCached({ url: vendor_url, role: 'vendor', supplementalDocs: docs_vendor }),
+      ingestCached({ url: product_url, role: 'product' }),
+    ]);
+    const vBlock = { name: vendor.target?.name, summary: vendor.summary, atoms: vendor.atoms };
+    const pBlock = { name: product.target?.name, summary: product.summary, atoms: product.atoms };
+
+    let done = 0, next = 0;
+    const CONCURRENCY = 3;
+    async function worker() {
+      while (next < cleaned.length) {
+        const url = cleaned[next++];
+        try {
+          const partner = await ingestCached({ url, role: 'partner' });
+          const score = await recruitIntel.scoreFit(
+            { vendor: vBlock, product: pBlock, partner: { name: partner.target?.name, summary: partner.summary, atoms: partner.atoms } },
+            { conflictMode: process.env.RECRUIT_CONFLICT_MODE || 'penalty' }
+          );
+          send('row', {
+            url,
+            name: partner.target?.name || url,
+            fit_score: score.fit_score,
+            verdict: score.verdict,
+            readiness_score: score.readiness_score ?? null,
+            gate_passed: score.fit_score >= GATE_THRESHOLD,
+            conflict: !!(score.channel_conflict && score.channel_conflict.direct_competitor),
+            top_green: (score.green_flags || [])[0] || null,
+            top_red: (score.red_flags || [])[0] || null,
+          });
+        } catch (err) {
+          send('row', { url, name: url, error: err.message });
+        }
+        send('progress', { done: ++done, total: cleaned.length });
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, cleaned.length) }, worker));
+    send('done', { total: cleaned.length, gate_threshold: GATE_THRESHOLD });
+    clearInterval(keepAlive); res.end();
+  } catch (err) {
+    console.error('[recruit-batch]', err.message);
+    send('error', { error: err.message });
+    clearInterval(keepAlive); res.end();
+  }
+});
+
+// ─── TRIAGE FUNNEL (SSE) — XLSX/list → cheap 1-10 → auto-run the winners ─────
+// Pass 1 (all): light-scrape + batched 1-10. Cut the bottom, promote the top,
+// re-triage the middle (pass 2, fuller signal) and promote its upper half. Then
+// auto-run the promoted set through the FULL flow → each a saved run + live link.
+async function lightFetch(url, cache) {
+  if (cache.has(url)) return cache.get(url);
+  let v;
+  try { v = await brain.fetchAndStrip(url); }
+  catch (e) { v = { url, title: null, description: null, text: '', error: e.message }; }
+  cache.set(url, v);
+  return v;
+}
+async function mapPool(items, size, fn) {
+  const out = new Array(items.length); let i = 0;
+  await Promise.all(Array.from({ length: Math.min(size, items.length) || 1 }, async () => {
+    while (i < items.length) { const idx = i++; out[idx] = await fn(items[idx], idx); }
+  }));
+  return out;
+}
+function chunk(arr, n) { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out; }
+
+// Run ONE partner through the full flow using already-ingested vendor+product.
+// Auto-picks the top strategy and generates its outreach so the live link is complete.
+async function runWinnerFullPass({ vendor, product, vendor_url, product_url, partner_url }) {
+  const run_id = newRunId();
+  const partner = await ingestCached({ url: partner_url, role: 'partner' });
+  const scoreEntities = {
+    vendor:  { name: vendor.target?.name,  summary: vendor.summary,  atoms: vendor.atoms },
+    product: { name: product.target?.name, summary: product.summary, atoms: product.atoms },
+    partner: { name: partner.target?.name, summary: partner.summary, atoms: partner.atoms },
+  };
+  const score = await recruitIntel.scoreFit(scoreEntities, { conflictMode: process.env.RECRUIT_CONFLICT_MODE || 'penalty' });
+  const dimByKey = Object.fromEntries(recruitIntel.FIT_DIMENSIONS.map(d => [d.key, d]));
+  score.subscores = (score.subscores || []).map(s => ({ ...s, name: dimByKey[s.key]?.label || s.key, weight: dimByKey[s.key]?.weight ?? null }));
+  const painsOut = await recruitExtras.generatePains({ vendor, product, partner, score }).catch(() => ({ pains: [] }));
+  const strategies = await recruitIntel.generateRecruitStrategies({ ...scoreEntities, fit: score });
+  const chosen = (strategies?.strategies || []).find(s => s.id === strategies.top_pick_id) || (strategies?.strategies || [])[0] || null;
+  let outreach = null;
+  if (chosen) outreach = await recruitIntel.generateOutreach({ ...scoreEntities, fit: score, chosen_strategy: chosen })
+    .catch((e) => { console.error('[winner outreach]', e.message); return null; });
+  const inputs = { vendor_url, product_url, partner_url };
+  const results = { run_id, ...inputs, vendor, product, partner, score, pains: painsOut.pains, gate_passed: score.fit_score >= GATE_THRESHOLD, strategies, chosen_strategy: chosen, outreach };
+  runStore.set(run_id, results);
+  db.saveRun(run_id, inputs, results).catch(e => console.error('[db] saveRun:', e.message));
+  if (chosen && outreach) db.saveOutreach(run_id, chosen.id, chosen.title || '', outreach).catch(e => console.error('[db] saveOutreach:', e.message));
+  return { run_id, fit_score: score.fit_score, name: partner.target?.name || partner_url };
+}
+
+app.post('/api/recruit-triage', async (req, res) => {
+  const {
+    vendor_url, product_url, partner_urls, docs_vendor,
+    cut_below = 4, promote_at = 8,
+    max_full_pass = parseInt(process.env.TRIAGE_MAX_FULL_PASS || '25', 10),
+  } = req.body || {};
+  if (!vendor_url)  return res.status(400).json({ error: 'Require vendor_url' });
+  if (!product_url) return res.status(400).json({ error: 'Require product_url' });
+  const urls = Array.isArray(partner_urls) ? [...new Set(partner_urls.map(u => String(u || '').trim()).filter(Boolean))] : [];
+  if (!urls.length) return res.status(400).json({ error: 'Require at least one partner URL' });
+  if (!OPENROUTER_API_KEY || !OPENROUTER_MODEL_ID) return res.status(500).json({ error: 'Server not configured' });
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+  const keepAlive = setInterval(() => { try { res.write(':keepalive\n\n'); } catch {} }, 15000);
+  const send = (event, data) => { try { res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } catch {} };
+
+  const fetchCache = new Map();
+  try {
+    send('phase', { label: 'Reading vendor + product…' });
+    const [vendor, product] = await Promise.all([
+      ingestCached({ url: vendor_url, role: 'vendor', supplementalDocs: docs_vendor }),
+      ingestCached({ url: product_url, role: 'product' }),
+    ]);
+    const vP = { name: vendor.target?.name, summary: vendor.summary };
+    const pP = { name: product.target?.name, summary: product.summary };
+
+    // Light-scrape every partner (concurrency 5) — homepage signal only, no LLM decompose.
+    send('phase', { label: `Scanning ${urls.length} partner sites…` });
+    const scraped = await mapPool(urls, 5, async (url) => {
+      const f = await lightFetch(url, fetchCache);
+      return { url, name: f.title || null, snippet: `${f.title || ''} — ${f.description || ''} ${String(f.text || '').slice(0, 400)}` };
+    });
+
+    // PASS 1 — batched 1-10 over everything.
+    send('phase', { label: 'Triage pass 1 (1-10)…' });
+    const pass1 = [];
+    for (const grp of chunk(scraped, 18)) {
+      const scored = await recruitIntel.triageBatch({ vendor: vP, product: pP, partners: grp });
+      for (const s of scored) { pass1.push(s); send('triage', { pass: 1, ...s }); }
+    }
+    const winners = pass1.filter(r => r.score >= promote_at);
+    const middle  = pass1.filter(r => r.score < promote_at && r.score >= cut_below);
+    const cut     = pass1.filter(r => r.score < cut_below);
+    send('partition', { pass: 1, promoted: winners.length, middle: middle.length, cut: cut.length });
+
+    // PASS 2 — re-triage the middle with a fuller snippet; promote the upper half.
+    if (middle.length) {
+      send('phase', { label: `Triage pass 2 on the ${middle.length} middle…` });
+      const midInput = middle.map(m => {
+        const f = fetchCache.get(m.url) || {};
+        return { url: m.url, name: m.name, snippet: `${f.title || ''} — ${f.description || ''} ${String(f.text || '').slice(0, 1500)}` };
+      });
+      const pass2 = [];
+      for (const grp of chunk(midInput, 18)) {
+        const scored = await recruitIntel.triageBatch({ vendor: vP, product: pP, partners: grp });
+        for (const s of scored) { pass2.push(s); send('triage', { pass: 2, ...s }); }
+      }
+      pass2.sort((a, b) => b.score - a.score);
+      const half = Math.ceil(pass2.length / 2);
+      pass2.slice(0, half).forEach(r => winners.push(r));
+      send('partition', { pass: 2, promoted_from_middle: half, cut_from_middle: pass2.length - half });
+    }
+
+    // Rank + cap the promoted set, then auto-run each through the FULL flow (concurrency 2).
+    winners.sort((a, b) => b.score - a.score);
+    const toRun = winners.slice(0, max_full_pass);
+    send('winners_start', { total: toRun.length, promoted_total: winners.length });
+
+    let done = 0;
+    await mapPool(toRun, 2, async (w) => {
+      try {
+        const r = await runWinnerFullPass({ vendor, product, vendor_url, product_url, partner_url: w.url });
+        send('winner', { url: w.url, name: r.name, triage_score: w.score, run_id: r.run_id, fit_score: r.fit_score });
+      } catch (err) {
+        send('winner', { url: w.url, name: w.name || w.url, triage_score: w.score, error: err.message });
+      }
+      send('winner_progress', { done: ++done, total: toRun.length });
+    });
+
+    send('done', { triaged: urls.length, promoted: winners.length, ran: toRun.length });
+    clearInterval(keepAlive); res.end();
+  } catch (err) {
+    console.error('[recruit-triage]', err.message);
+    send('error', { error: err.message });
+    clearInterval(keepAlive); res.end();
+  }
+});
 
 // ─── OUTREACH KIT (on strategy selection) ────────────────────────────────────
 app.post('/api/recruit-outreach', async (req, res) => {

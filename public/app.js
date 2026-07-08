@@ -4,6 +4,9 @@ const state = { runId: null, docs: { vendor: [], partner: [] }, lastInputs: null
 
 // ─── AUTH BADGE ──────────────────────────────────────────────────────────────
 async function boot() {
+  // Shareable live link: /?run=<id> renders a saved analysis read-only.
+  const runParam = new URLSearchParams(location.search).get('run');
+  if (runParam) return renderSavedRun(runParam);
   try {
     const r = await fetch('/api/auth/me', { credentials: 'include' });
     if (r.status === 401) { location.href = '/login.html'; return; }
@@ -11,6 +14,33 @@ async function boot() {
     $('runsBadge').textContent = me.unlimited ? 'Unlimited' : `${me.remaining ?? 0} runs left`;
     $('logoutBtn').hidden = false;
   } catch { /* leave badge blank */ }
+}
+
+// Render a saved run (the "live link" target) read-only, reusing the normal renderers.
+async function renderSavedRun(run_id) {
+  try {
+    const r = await fetch(`/api/recruit/${encodeURIComponent(run_id)}`, { credentials: 'include' });
+    if (!r.ok) throw new Error(`Run not found (${r.status})`);
+    const run = await r.json();
+    state.runId = run_id;
+    $('inputCard').hidden = true;
+    const banner = document.createElement('section');
+    banner.className = 'card';
+    banner.innerHTML = `<h1>Recruit analysis</h1><p class="sub">Saved analysis for <b>${escapeHtml(run.partner?.target?.name || run.partner_url || 'this partner')}</b> — vendor <b>${escapeHtml(run.vendor?.target?.name || '')}</b>, product <b>${escapeHtml(run.product?.target?.name || '')}</b>.</p>`;
+    $('inputCard').insertAdjacentElement('afterend', banner);
+    if (run.vendor)  renderEntityAtoms({ role: 'vendor',  name: run.vendor.target?.name,  summary: run.vendor.summary,  atoms: run.vendor.atoms });
+    if (run.product) renderEntityAtoms({ role: 'product', name: run.product.target?.name, summary: run.product.summary, atoms: run.product.atoms });
+    if (run.partner) renderEntityAtoms({ role: 'partner', name: run.partner.target?.name, summary: run.partner.summary, atoms: run.partner.atoms });
+    if (run.score) renderScore(run.score);
+    if (run.pains) renderPains({ pains: run.pains });
+    if (run.strategies) renderStrategies(run.strategies);
+    if (run.outreach) { $('outreachCard').hidden = false; renderOutreach(run.outreach, run.chosen_strategy); }
+    $('toolsCard').hidden = false; wireTools();
+    $('coachCard').hidden = false;
+  } catch (e) {
+    const main = document.querySelector('main');
+    if (main) main.innerHTML = `<section class="card"><h2>Couldn't load this analysis</h2><p class="sub">${escapeHtml(e.message)}</p></section>`;
+  }
 }
 $('logoutBtn').addEventListener('click', async () => {
   await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
@@ -467,5 +497,221 @@ function mountVoiceWidget(agentId) {
 function escapeHtml(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 function cap(s) { return String(s || '').charAt(0).toUpperCase() + String(s || '').slice(1); }
 function prettyName(s) { return String(s || '').replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()); }
+
+// ─── MODE TOGGLE (single vs batch) ───────────────────────────────────────────
+function setMode(mode) {
+  const batch = mode === 'batch';
+  $('modeSingle').classList.toggle('active', !batch);
+  $('modeBatch').classList.toggle('active', batch);
+  $('singlePane').hidden = batch;
+  $('batchPane').hidden = !batch;
+}
+$('modeSingle').addEventListener('click', () => setMode('single'));
+$('modeBatch').addEventListener('click', () => setMode('batch'));
+
+// ─── BATCH QUICK-PULL ────────────────────────────────────────────────────────
+function extractUrls(text) {
+  const matches = String(text || '').match(/https?:\/\/[^\s,"'<>)\]]+/gi) || [];
+  return [...new Set(matches.map((u) => u.replace(/[.,;]+$/, '')))];
+}
+
+$('csvBtn').addEventListener('click', () => $('csvInput').click());
+$('csvInput').addEventListener('change', async () => {
+  const file = $('csvInput').files[0];
+  if (!file) return;
+  const ext = (file.name.split('.').pop() || '').toLowerCase();
+  $('csvNote').textContent = 'Reading…';
+  try {
+    let text = '';
+    if (ext === 'xlsx') {
+      // Binary — let the server extract cell text + hyperlink targets, then regex URLs.
+      const fd = new FormData(); fd.append('file', file);
+      const r = await fetch('/api/upload-doc', { method: 'POST', body: fd, credentials: 'include' });
+      const d = await r.json(); if (!r.ok) throw new Error(d.error || 'upload failed');
+      text = d.text || '';
+    } else {
+      text = await file.text();
+    }
+    const urls = extractUrls(text);
+    const existing = $('partnerList').value.trim();
+    $('partnerList').value = (existing ? existing + '\n' : '') + urls.join('\n');
+    $('csvNote').textContent = `+${urls.length} from ${file.name}`;
+  } catch (e) {
+    $('csvNote').textContent = `Failed: ${e.message}`;
+  }
+  $('csvInput').value = '';
+});
+
+const batchRows = [];
+$('batchBtn').addEventListener('click', runBatch);
+
+async function runBatch() {
+  const vendor_url = $('vendorUrl').value.trim();
+  const product_url = $('productUrl').value.trim();
+  const partner_urls = extractUrls($('partnerList').value);
+  if (!vendor_url || !product_url) { alert('Enter the Vendor and Product URLs.'); return; }
+  if (!partner_urls.length) { alert('Add at least one partner URL (one per line).'); return; }
+
+  batchRows.length = 0;
+  $('batchCard').hidden = false;
+  $('batchRows').innerHTML = '';
+  $('batchStatus').innerHTML = '<span class="spin"></span> Starting…';
+  $('batchBtn').disabled = true;
+
+  try {
+    const res = await fetch('/api/recruit-batch', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+      body: JSON.stringify({ vendor_url, product_url, partner_urls, docs_vendor: state.docs.vendor }),
+    });
+    if (!res.ok || !res.body) { const d = await res.json().catch(() => ({})); throw new Error(d.error || `HTTP ${res.status}`); }
+    await readSSE(res.body, handleBatchEvent);
+  } catch (e) {
+    $('batchStatus').innerHTML = `<span style="color:var(--bad)">Error: ${escapeHtml(e.message)}</span>`;
+  } finally {
+    $('batchBtn').disabled = false;
+  }
+}
+
+function handleBatchEvent(event, data) {
+  switch (event) {
+    case 'start':
+      $('batchStatus').innerHTML = `<span class="spin"></span> Scoring 0/${data.total}…`;
+      break;
+    case 'row':
+      batchRows.push(data);
+      renderBatch();
+      break;
+    case 'progress':
+      $('batchStatus').innerHTML = `<span class="spin"></span> Scored ${data.done}/${data.total}…`;
+      break;
+    case 'done':
+      $('batchStatus').textContent = `Done — ${batchRows.length} partners scored, ranked by fit. Deep-dive the winners.`;
+      renderBatch();
+      break;
+    case 'error':
+      $('batchStatus').innerHTML = `<span style="color:var(--bad)">Error: ${escapeHtml(data.error)}</span>`;
+      break;
+  }
+}
+
+function renderBatch() {
+  const rows = [...batchRows].sort((a, b) => (b.fit_score ?? -1) - (a.fit_score ?? -1));
+  $('batchRows').innerHTML = rows.map((r, i) => {
+    if (r.error) {
+      return `<tr class="batch-err"><td>${i + 1}</td><td>${escapeHtml(r.name || r.url)}</td><td>—</td><td colspan="2">Failed: ${escapeHtml(r.error)}</td><td></td></tr>`;
+    }
+    const col = scoreColor(r.fit_score);
+    const notes = [
+      r.gate_passed ? '' : 'below gate',
+      r.conflict ? '⚠ conflict' : '',
+      r.readiness_score != null ? `readiness ${r.readiness_score}` : '',
+    ].filter(Boolean).join(' · ');
+    return `<tr>
+      <td>${i + 1}</td>
+      <td><a href="${escapeHtml(r.url)}" target="_blank" rel="noopener">${escapeHtml(r.name || r.url)}</a></td>
+      <td><b style="color:${col}">${r.fit_score}</b></td>
+      <td>${escapeHtml(r.verdict || '')}</td>
+      <td class="sub">${escapeHtml(notes)}${r.top_green ? `<div class="evi">+ ${escapeHtml(r.top_green)}</div>` : ''}${r.top_red ? `<div class="evi">- ${escapeHtml(r.top_red)}</div>` : ''}</td>
+      <td><button class="secondary batch-open" data-url="${escapeHtml(r.url)}">Deep-dive →</button></td>
+    </tr>`;
+  }).join('');
+  $('batchRows').querySelectorAll('.batch-open').forEach((b) => {
+    b.addEventListener('click', () => openFromBatch(b.dataset.url));
+  });
+}
+
+function openFromBatch(url) {
+  setMode('single');
+  $('partnerUrl').value = url;
+  $('batchCard').hidden = true;
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+  runFlow(false);
+}
+
+// ─── TRIAGE FUNNEL ───────────────────────────────────────────────────────────
+const triageRows = [];
+const winnerRows = [];
+$('triageBtn').addEventListener('click', runTriage);
+
+async function runTriage() {
+  const vendor_url = $('vendorUrl').value.trim();
+  const product_url = $('productUrl').value.trim();
+  const partner_urls = extractUrls($('partnerList').value);
+  if (!vendor_url || !product_url) { alert('Enter the Vendor and Product URLs.'); return; }
+  if (!partner_urls.length) { alert('Add partner URLs (paste, or upload Excel/CSV).'); return; }
+
+  triageRows.length = 0; winnerRows.length = 0;
+  $('triageCard').hidden = false; $('triageRows').innerHTML = ''; $('triageCounts').innerHTML = '';
+  $('winnersCard').hidden = true; $('winnersRows').innerHTML = ''; $('winnersActions').innerHTML = '';
+  $('triageStatus').innerHTML = '<span class="spin"></span> Starting…';
+  $('triageBtn').disabled = true; $('batchBtn').disabled = true;
+
+  try {
+    const res = await fetch('/api/recruit-triage', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+      body: JSON.stringify({ vendor_url, product_url, partner_urls, docs_vendor: state.docs.vendor }),
+    });
+    if (!res.ok || !res.body) { const d = await res.json().catch(() => ({})); throw new Error(d.error || `HTTP ${res.status}`); }
+    await readSSE(res.body, handleTriageEvent);
+  } catch (e) {
+    $('triageStatus').innerHTML = `<span style="color:var(--bad)">Error: ${escapeHtml(e.message)}</span>`;
+  } finally {
+    $('triageBtn').disabled = false; $('batchBtn').disabled = false;
+  }
+}
+
+function handleTriageEvent(event, data) {
+  switch (event) {
+    case 'phase': $('triageStatus').innerHTML = `<span class="spin"></span> ${escapeHtml(data.label || '')}`; break;
+    case 'triage': triageRows.push(data); renderTriageRows(); break;
+    case 'partition': {
+      const el = document.createElement('span'); el.className = 'chip';
+      el.textContent = data.pass === 1
+        ? `Pass 1 → promote ${data.promoted}, middle ${data.middle}, cut ${data.cut}`
+        : `Pass 2 → +${data.promoted_from_middle} promoted, ${data.cut_from_middle} cut`;
+      $('triageCounts').appendChild(el);
+      break;
+    }
+    case 'winners_start':
+      $('winnersCard').hidden = false;
+      $('winnersStatus').innerHTML = `<span class="spin"></span> running ${data.total} full analyses…`;
+      break;
+    case 'winner': winnerRows.push(data); renderWinners(); break;
+    case 'winner_progress': $('winnersStatus').innerHTML = `<span class="spin"></span> ${data.done}/${data.total} done…`; break;
+    case 'done':
+      $('triageStatus').textContent = `Triaged ${data.triaged} · promoted ${data.promoted} · ran ${data.ran} full analyses.`;
+      $('winnersStatus').textContent = `${winnerRows.filter((w) => !w.error).length} live analyses ready.`;
+      renderWinners();
+      break;
+    case 'error': $('triageStatus').innerHTML = `<span style="color:var(--bad)">Error: ${escapeHtml(data.error)}</span>`; break;
+  }
+}
+
+function renderTriageRows() {
+  const rows = [...triageRows].sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+  $('triageRows').innerHTML = rows.map((r) => {
+    const col = r.score >= 8 ? 'var(--good)' : r.score >= 4 ? 'var(--warn)' : 'var(--bad)';
+    return `<tr><td>${escapeHtml(r.name || r.url)}</td><td>${r.pass}</td><td><b style="color:${col}">${r.score}</b></td><td class="sub">${escapeHtml(r.reason || '')}</td></tr>`;
+  }).join('');
+}
+
+function renderWinners() {
+  const rows = [...winnerRows].sort((a, b) => (b.fit_score ?? -1) - (a.fit_score ?? -1));
+  const ids = rows.filter((w) => w.run_id).map((w) => w.run_id);
+  const links = ids.map((id) => `${location.origin}/?run=${id}`);
+  $('winnersActions').innerHTML = ids.length
+    ? `<button class="secondary" id="copyLinksBtn">Copy all ${ids.length} live links</button> <button class="secondary" id="combinedReportBtn">Download combined report</button>`
+    : '';
+  $('winnersRows').innerHTML = rows.map((w, i) => {
+    if (w.error) return `<tr class="batch-err"><td>${i + 1}</td><td>${escapeHtml(w.name || w.url)}</td><td>${w.triage_score ?? ''}</td><td>—</td><td>Failed: ${escapeHtml(w.error)}</td></tr>`;
+    const col = w.fit_score >= 75 ? 'var(--good)' : w.fit_score >= 60 ? 'var(--brand)' : 'var(--warn)';
+    const link = `${location.origin}/?run=${w.run_id}`;
+    return `<tr><td>${i + 1}</td><td>${escapeHtml(w.name || w.url)}</td><td>${w.triage_score ?? ''}</td><td><b style="color:${col}">${w.fit_score}</b></td><td><a href="${escapeHtml(link)}" target="_blank" rel="noopener">Open →</a></td></tr>`;
+  }).join('');
+  const cb = $('copyLinksBtn');
+  if (cb) cb.addEventListener('click', () => { navigator.clipboard.writeText(links.join('\n')); cb.textContent = 'Copied'; setTimeout(() => (cb.textContent = `Copy all ${links.length} live links`), 1200); });
+  const rb = $('combinedReportBtn');
+  if (rb) rb.addEventListener('click', () => window.open('/api/recruit-report-batch?ids=' + encodeURIComponent(ids.join(',')), '_blank'));
+}
 
 boot();
