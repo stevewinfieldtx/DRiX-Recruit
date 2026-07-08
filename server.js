@@ -166,6 +166,19 @@ async function extractPptxText(buffer) {
   return texts.join('\n\n');
 }
 
+// Pull text (incl. hyperlink targets) out of an .xlsx — enough to regex URLs from.
+async function extractXlsxText(buffer) {
+  const dir = await unzipper.Open.buffer(buffer);
+  const parts = [];
+  for (const f of dir.files) {
+    if (!/(sharedStrings\.xml|worksheets\/sheet\d+\.xml|\.rels)$/i.test(f.path)) continue;
+    const content = (await f.buffer()).toString('utf-8');
+    (content.match(/<t[^>]*>([^<]*)<\/t>/g) || []).forEach(m => parts.push(m.replace(/<\/?t[^>]*>/g, '')));
+    (content.match(/https?:\/\/[^"'\s<>]+/g) || []).forEach(u => parts.push(u)); // hyperlink Target="…" + raw urls
+  }
+  return parts.join('\n');
+}
+
 app.post('/api/upload-doc', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file provided' });
@@ -175,6 +188,8 @@ app.post('/api/upload-doc', upload.single('file'), async (req, res) => {
     else if (ext === '.pdf') text = (await pdfParse(req.file.buffer)).text || '';
     else if (ext === '.docx') text = (await mammoth.extractRawText({ buffer: req.file.buffer })).value || '';
     else if (ext === '.pptx') text = await extractPptxText(req.file.buffer);
+    else if (ext === '.xlsx') text = await extractXlsxText(req.file.buffer);
+    else if (ext === '.csv')  text = req.file.buffer.toString('utf-8');
     else return res.status(400).json({ error: `Cannot extract text from ${ext} files` });
     text = text.trim().slice(0, 100000);
     res.json({ ok: true, filename: req.file.originalname, size: req.file.size, chars: text.length, text });
@@ -417,6 +432,146 @@ app.post('/api/recruit-batch', async (req, res) => {
     clearInterval(keepAlive); res.end();
   } catch (err) {
     console.error('[recruit-batch]', err.message);
+    send('error', { error: err.message });
+    clearInterval(keepAlive); res.end();
+  }
+});
+
+// ─── TRIAGE FUNNEL (SSE) — XLSX/list → cheap 1-10 → auto-run the winners ─────
+// Pass 1 (all): light-scrape + batched 1-10. Cut the bottom, promote the top,
+// re-triage the middle (pass 2, fuller signal) and promote its upper half. Then
+// auto-run the promoted set through the FULL flow → each a saved run + live link.
+async function lightFetch(url, cache) {
+  if (cache.has(url)) return cache.get(url);
+  let v;
+  try { v = await brain.fetchAndStrip(url); }
+  catch (e) { v = { url, title: null, description: null, text: '', error: e.message }; }
+  cache.set(url, v);
+  return v;
+}
+async function mapPool(items, size, fn) {
+  const out = new Array(items.length); let i = 0;
+  await Promise.all(Array.from({ length: Math.min(size, items.length) || 1 }, async () => {
+    while (i < items.length) { const idx = i++; out[idx] = await fn(items[idx], idx); }
+  }));
+  return out;
+}
+function chunk(arr, n) { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out; }
+
+// Run ONE partner through the full flow using already-ingested vendor+product.
+// Auto-picks the top strategy and generates its outreach so the live link is complete.
+async function runWinnerFullPass({ vendor, product, vendor_url, product_url, partner_url }) {
+  const run_id = newRunId();
+  const partner = await ingestCached({ url: partner_url, role: 'partner' });
+  const scoreEntities = {
+    vendor:  { name: vendor.target?.name,  summary: vendor.summary,  atoms: vendor.atoms },
+    product: { name: product.target?.name, summary: product.summary, atoms: product.atoms },
+    partner: { name: partner.target?.name, summary: partner.summary, atoms: partner.atoms },
+  };
+  const score = await recruitIntel.scoreFit(scoreEntities, { conflictMode: process.env.RECRUIT_CONFLICT_MODE || 'penalty' });
+  const dimByKey = Object.fromEntries(recruitIntel.FIT_DIMENSIONS.map(d => [d.key, d]));
+  score.subscores = (score.subscores || []).map(s => ({ ...s, name: dimByKey[s.key]?.label || s.key, weight: dimByKey[s.key]?.weight ?? null }));
+  const painsOut = await recruitExtras.generatePains({ vendor, product, partner, score }).catch(() => ({ pains: [] }));
+  const strategies = await recruitIntel.generateRecruitStrategies({ ...scoreEntities, fit: score });
+  const chosen = (strategies?.strategies || []).find(s => s.id === strategies.top_pick_id) || (strategies?.strategies || [])[0] || null;
+  let outreach = null;
+  if (chosen) outreach = await recruitIntel.generateOutreach({ ...scoreEntities, fit: score, chosen_strategy: chosen })
+    .catch((e) => { console.error('[winner outreach]', e.message); return null; });
+  const inputs = { vendor_url, product_url, partner_url };
+  const results = { run_id, ...inputs, vendor, product, partner, score, pains: painsOut.pains, gate_passed: score.fit_score >= GATE_THRESHOLD, strategies, chosen_strategy: chosen, outreach };
+  runStore.set(run_id, results);
+  db.saveRun(run_id, inputs, results).catch(e => console.error('[db] saveRun:', e.message));
+  if (chosen && outreach) db.saveOutreach(run_id, chosen.id, chosen.title || '', outreach).catch(e => console.error('[db] saveOutreach:', e.message));
+  return { run_id, fit_score: score.fit_score, name: partner.target?.name || partner_url };
+}
+
+app.post('/api/recruit-triage', async (req, res) => {
+  const {
+    vendor_url, product_url, partner_urls, docs_vendor,
+    cut_below = 4, promote_at = 8,
+    max_full_pass = parseInt(process.env.TRIAGE_MAX_FULL_PASS || '25', 10),
+  } = req.body || {};
+  if (!vendor_url)  return res.status(400).json({ error: 'Require vendor_url' });
+  if (!product_url) return res.status(400).json({ error: 'Require product_url' });
+  const urls = Array.isArray(partner_urls) ? [...new Set(partner_urls.map(u => String(u || '').trim()).filter(Boolean))] : [];
+  if (!urls.length) return res.status(400).json({ error: 'Require at least one partner URL' });
+  if (!OPENROUTER_API_KEY || !OPENROUTER_MODEL_ID) return res.status(500).json({ error: 'Server not configured' });
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+  const keepAlive = setInterval(() => { try { res.write(':keepalive\n\n'); } catch {} }, 15000);
+  const send = (event, data) => { try { res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } catch {} };
+
+  const fetchCache = new Map();
+  try {
+    send('phase', { label: 'Reading vendor + product…' });
+    const [vendor, product] = await Promise.all([
+      ingestCached({ url: vendor_url, role: 'vendor', supplementalDocs: docs_vendor }),
+      ingestCached({ url: product_url, role: 'product' }),
+    ]);
+    const vP = { name: vendor.target?.name, summary: vendor.summary };
+    const pP = { name: product.target?.name, summary: product.summary };
+
+    // Light-scrape every partner (concurrency 5) — homepage signal only, no LLM decompose.
+    send('phase', { label: `Scanning ${urls.length} partner sites…` });
+    const scraped = await mapPool(urls, 5, async (url) => {
+      const f = await lightFetch(url, fetchCache);
+      return { url, name: f.title || null, snippet: `${f.title || ''} — ${f.description || ''} ${String(f.text || '').slice(0, 400)}` };
+    });
+
+    // PASS 1 — batched 1-10 over everything.
+    send('phase', { label: 'Triage pass 1 (1-10)…' });
+    const pass1 = [];
+    for (const grp of chunk(scraped, 18)) {
+      const scored = await recruitIntel.triageBatch({ vendor: vP, product: pP, partners: grp });
+      for (const s of scored) { pass1.push(s); send('triage', { pass: 1, ...s }); }
+    }
+    const winners = pass1.filter(r => r.score >= promote_at);
+    const middle  = pass1.filter(r => r.score < promote_at && r.score >= cut_below);
+    const cut     = pass1.filter(r => r.score < cut_below);
+    send('partition', { pass: 1, promoted: winners.length, middle: middle.length, cut: cut.length });
+
+    // PASS 2 — re-triage the middle with a fuller snippet; promote the upper half.
+    if (middle.length) {
+      send('phase', { label: `Triage pass 2 on the ${middle.length} middle…` });
+      const midInput = middle.map(m => {
+        const f = fetchCache.get(m.url) || {};
+        return { url: m.url, name: m.name, snippet: `${f.title || ''} — ${f.description || ''} ${String(f.text || '').slice(0, 1500)}` };
+      });
+      const pass2 = [];
+      for (const grp of chunk(midInput, 18)) {
+        const scored = await recruitIntel.triageBatch({ vendor: vP, product: pP, partners: grp });
+        for (const s of scored) { pass2.push(s); send('triage', { pass: 2, ...s }); }
+      }
+      pass2.sort((a, b) => b.score - a.score);
+      const half = Math.ceil(pass2.length / 2);
+      pass2.slice(0, half).forEach(r => winners.push(r));
+      send('partition', { pass: 2, promoted_from_middle: half, cut_from_middle: pass2.length - half });
+    }
+
+    // Rank + cap the promoted set, then auto-run each through the FULL flow (concurrency 2).
+    winners.sort((a, b) => b.score - a.score);
+    const toRun = winners.slice(0, max_full_pass);
+    send('winners_start', { total: toRun.length, promoted_total: winners.length });
+
+    let done = 0;
+    await mapPool(toRun, 2, async (w) => {
+      try {
+        const r = await runWinnerFullPass({ vendor, product, vendor_url, product_url, partner_url: w.url });
+        send('winner', { url: w.url, name: r.name, triage_score: w.score, run_id: r.run_id, fit_score: r.fit_score });
+      } catch (err) {
+        send('winner', { url: w.url, name: w.name || w.url, triage_score: w.score, error: err.message });
+      }
+      send('winner_progress', { done: ++done, total: toRun.length });
+    });
+
+    send('done', { triaged: urls.length, promoted: winners.length, ran: toRun.length });
+    clearInterval(keepAlive); res.end();
+  } catch (err) {
+    console.error('[recruit-triage]', err.message);
     send('error', { error: err.message });
     clearInterval(keepAlive); res.end();
   }
