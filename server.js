@@ -166,17 +166,64 @@ async function extractPptxText(buffer) {
   return texts.join('\n\n');
 }
 
-// Pull text (incl. hyperlink targets) out of an .xlsx — enough to regex URLs from.
+// Parse an .xlsx as a TABLE and pull PARTNER website URLs: find the website/domain
+// column by its header (never the social columns), normalize bare domains to
+// https://, and drop social + email + schema noise. Falls back to domain-like
+// cells only if no website header is found. Returns newline-joined URLs.
+const SOCIAL_HOST = /(?:^|\.)(?:twitter\.com|x\.com|facebook\.com|fb\.com|linkedin\.com|instagram\.com|youtube\.com|tiktok\.com|pinterest\.com|t\.co)(?:[\/:?]|$)/i;
+function xlsxDecode(s) {
+  return String(s).replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#3?9;|&apos;/g, "'");
+}
+function colIdx(ref) { const m = /^([A-Z]+)/.exec(ref); let n = 0; for (const ch of (m ? m[1] : 'A')) n = n * 26 + (ch.charCodeAt(0) - 64); return n - 1; }
+function normSite(v) {
+  let s = String(v || '').trim().replace(/^https?:\/\//i, '').replace(/^\/+/, '');
+  if (!s || s.includes('@') || /\s/.test(s)) return null;   // skip emails / multi-word junk
+  if (!/^[\w-]+(\.[\w-]+)+/.test(s)) return null;           // must look like a domain
+  if (SOCIAL_HOST.test(s)) return null;                     // drop social hosts
+  return 'https://' + s.replace(/\/+$/, '');
+}
 async function extractXlsxText(buffer) {
   const dir = await unzipper.Open.buffer(buffer);
-  const parts = [];
-  for (const f of dir.files) {
-    if (!/(sharedStrings\.xml|worksheets\/sheet\d+\.xml|\.rels)$/i.test(f.path)) continue;
-    const content = (await f.buffer()).toString('utf-8');
-    (content.match(/<t[^>]*>([^<]*)<\/t>/g) || []).forEach(m => parts.push(m.replace(/<\/?t[^>]*>/g, '')));
-    (content.match(/https?:\/\/[^"'\s<>]+/g) || []).forEach(u => parts.push(u)); // hyperlink Target="…" + raw urls
+  // shared strings table
+  const ss = [];
+  const ssFile = dir.files.find(f => /xl\/sharedStrings\.xml$/i.test(f.path));
+  if (ssFile) {
+    const c = (await ssFile.buffer()).toString('utf-8');
+    for (const si of (c.match(/<si>[\s\S]*?<\/si>/g) || [])) {
+      const runs = si.match(/<t[^>]*>([\s\S]*?)<\/t>/g) || [];
+      ss.push(xlsxDecode(runs.map(t => t.replace(/<[^>]+>/g, '')).join('')));
+    }
   }
-  return parts.join('\n');
+  // first worksheet → rows of { colIndex: value }
+  const sheetFile = dir.files.filter(f => /xl\/worksheets\/sheet\d+\.xml$/i.test(f.path)).sort((a, b) => a.path.localeCompare(b.path))[0];
+  if (!sheetFile) return '';
+  const sheet = (await sheetFile.buffer()).toString('utf-8');
+  const rows = [];
+  for (const rowXml of (sheet.match(/<row[^>]*>[\s\S]*?<\/row>/g) || [])) {
+    const cells = {};
+    for (const c of (rowXml.match(/<c\b[^>]*?(?:\/>|>[\s\S]*?<\/c>)/g) || [])) {
+      const ref = (/r="([A-Z]+)\d+"/.exec(c) || [])[1];
+      if (!ref) continue;
+      const t = (/t="([^"]+)"/.exec(c) || [])[1] || 'n';
+      let val = '';
+      if (t === 's') { const vi = (/<v>(\d+)<\/v>/.exec(c) || [])[1]; val = ss[parseInt(vi, 10)] || ''; }
+      else if (t === 'inlineStr') { val = xlsxDecode((/<t[^>]*>([\s\S]*?)<\/t>/.exec(c) || [])[1] || ''); }
+      else { val = xlsxDecode((/<v>([\s\S]*?)<\/v>/.exec(c) || [])[1] || ''); }
+      cells[colIdx(ref)] = val;
+    }
+    rows.push(cells);
+  }
+  if (!rows.length) return '';
+  // header row → website column(s): match web/site/domain/url, never social columns
+  const header = rows[0];
+  const siteCols = Object.keys(header).map(Number).filter(ci => {
+    const h = String(header[ci] || '');
+    return /web\s*site|homepage|domain|\burl\b|\bwww\b|\bsite\b/i.test(h) && !/social|twitter|facebook|linked|instagram|youtube|tiktok/i.test(h);
+  });
+  const urls = [];
+  const source = siteCols.length ? rows.slice(1).flatMap(r => siteCols.map(ci => r[ci])) : rows.slice(1).flatMap(r => Object.values(r));
+  for (const v of source) { const u = normSite(v); if (u) urls.push(u); }
+  return [...new Set(urls)].join('\n');
 }
 
 app.post('/api/upload-doc', upload.single('file'), async (req, res) => {
