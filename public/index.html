@@ -5,6 +5,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>DRiX Recruit</title>
   <link rel="stylesheet" href="/styles.css" />
+  <style>
+    .modeToggle { display:flex; gap:8px; margin:0 0 18px; }
+    .modeToggle .toggle { flex:1; padding:10px 12px; border:1px solid var(--line,#2a2a3a); background:transparent; color:inherit; border-radius:8px; cursor:pointer; font:inherit; }
+    .modeToggle .toggle.active { background:var(--brand,#5b6cff); color:#fff; border-color:transparent; }
+    .batchwrap { overflow-x:auto; }
+    .batchtable { width:100%; border-collapse:collapse; font-size:14px; }
+    .batchtable th, .batchtable td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line,#2a2a3a); vertical-align:top; }
+    .batchtable th { font-size:12px; text-transform:uppercase; letter-spacing:.04em; opacity:.65; }
+    .batchtable tr.batch-err td { opacity:.6; }
+    .batchtable .batch-open { padding:6px 10px; font-size:13px; white-space:nowrap; }
+  </style>
 </head>
 <body>
   <header class="topbar">
@@ -21,6 +32,11 @@
       <h1>Should you recruit this partner?</h1>
       <p class="sub">Score a reseller for a vendor's partner program — focused on one product — then get five defended strategies and a full outreach kit.</p>
 
+      <div class="modeToggle">
+        <button type="button" id="modeSingle" class="toggle active">Single partner</button>
+        <button type="button" id="modeBatch" class="toggle">Batch quick-pull</button>
+      </div>
+
       <label class="field">
         <span>Vendor URL <em>the partner program you're recruiting into</em></span>
         <input id="vendorUrl" type="url" placeholder="https://vendor.com" />
@@ -36,23 +52,49 @@
         <input id="productUrl" type="url" placeholder="https://vendor.com/product" />
       </label>
 
-      <label class="field">
-        <span>Partner URL <em>the reseller you're evaluating</em></span>
-        <input id="partnerUrl" type="url" placeholder="https://reseller.com" />
-      </label>
-      <div class="uploads" id="partnerDocs" data-bucket="partner">
-        <button type="button" class="upload-btn">+ Add partner material (PDF / Word / PPTX / TXT)</button>
-        <input type="file" accept=".pdf,.docx,.pptx,.txt" multiple hidden />
-        <ul class="doclist"></ul>
+      <div id="singlePane">
+        <label class="field">
+          <span>Partner URL <em>the reseller you're evaluating</em></span>
+          <input id="partnerUrl" type="url" placeholder="https://reseller.com" />
+        </label>
+        <div class="uploads" id="partnerDocs" data-bucket="partner">
+          <button type="button" class="upload-btn">+ Add partner material (PDF / Word / PPTX / TXT)</button>
+          <input type="file" accept=".pdf,.docx,.pptx,.txt" multiple hidden />
+          <ul class="doclist"></ul>
+        </div>
+        <button id="runBtn" class="primary">Analyze fit →</button>
       </div>
 
-      <button id="runBtn" class="primary">Analyze fit →</button>
+      <div id="batchPane" hidden>
+        <label class="field">
+          <span>Partner URLs <em>one per line — each is scored against the vendor + product above</em></span>
+          <textarea id="partnerList" class="threadbox" rows="6" placeholder="https://reseller-a.com&#10;https://reseller-b.com&#10;https://reseller-c.com"></textarea>
+        </label>
+        <div class="uploads">
+          <button type="button" id="csvBtn" class="upload-btn">+ Upload CSV / TXT of URLs</button>
+          <input type="file" id="csvInput" accept=".csv,.txt" hidden />
+          <span id="csvNote" class="sub" style="display:inline;margin-left:8px"></span>
+        </div>
+        <button id="batchBtn" class="primary">Quick pull →</button>
+      </div>
     </section>
 
     <!-- PROGRESS -->
     <section id="progressCard" class="card" hidden>
       <div class="phase" id="phaseLabel">Working…</div>
       <ul class="loglist" id="logList"></ul>
+    </section>
+
+    <!-- BATCH RESULTS -->
+    <section id="batchCard" class="card" hidden>
+      <h2>Batch quick-pull</h2>
+      <p class="sub" id="batchStatus"></p>
+      <div class="batchwrap">
+        <table class="batchtable">
+          <thead><tr><th>#</th><th>Partner</th><th>Fit</th><th>Verdict</th><th>Notes</th><th></th></tr></thead>
+          <tbody id="batchRows"></tbody>
+        </table>
+      </div>
     </section>
 
     <!-- SCORE + GATE -->

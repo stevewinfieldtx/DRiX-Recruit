@@ -349,6 +349,79 @@ ${entityAtoms(v, 'VENDOR')}
 </body></html>`;
 }
 
+// ─── BATCH QUICK-PULL (SSE) — score many partners vs ONE vendor+product ──────
+// Triage a list: ingest vendor+product once, then ingest+score each partner and
+// stream a ranked row per partner. No strategies/outreach — that's the deep-dive
+// you run on the winners (single flow, which reuses the cached ingest).
+app.post('/api/recruit-batch', async (req, res) => {
+  const { vendor_url, product_url, partner_urls, docs_vendor } = req.body || {};
+  if (!vendor_url)  return res.status(400).json({ error: 'Require vendor_url' });
+  if (!product_url) return res.status(400).json({ error: 'Require product_url' });
+  const cleaned = Array.isArray(partner_urls)
+    ? [...new Set(partner_urls.map(u => String(u || '').trim()).filter(Boolean))]
+    : [];
+  if (!cleaned.length) return res.status(400).json({ error: 'Require at least one partner URL' });
+  if (!OPENROUTER_API_KEY || !OPENROUTER_MODEL_ID) {
+    return res.status(500).json({ error: 'Server not configured — set OPENROUTER_API_KEY and OPENROUTER_MODEL_ID' });
+  }
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+  const keepAlive = setInterval(() => { try { res.write(':keepalive\n\n'); } catch {} }, 15000);
+  const send = (event, data) => { try { res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } catch {} };
+
+  send('start', { total: cleaned.length });
+  try {
+    // Vendor + product are ingested ONCE and reused for every partner.
+    send('phase', { label: 'Reading vendor + product…' });
+    const [vendor, product] = await Promise.all([
+      ingestCached({ url: vendor_url, role: 'vendor', supplementalDocs: docs_vendor }),
+      ingestCached({ url: product_url, role: 'product' }),
+    ]);
+    const vBlock = { name: vendor.target?.name, summary: vendor.summary, atoms: vendor.atoms };
+    const pBlock = { name: product.target?.name, summary: product.summary, atoms: product.atoms };
+
+    let done = 0, next = 0;
+    const CONCURRENCY = 3;
+    async function worker() {
+      while (next < cleaned.length) {
+        const url = cleaned[next++];
+        try {
+          const partner = await ingestCached({ url, role: 'partner' });
+          const score = await recruitIntel.scoreFit(
+            { vendor: vBlock, product: pBlock, partner: { name: partner.target?.name, summary: partner.summary, atoms: partner.atoms } },
+            { conflictMode: process.env.RECRUIT_CONFLICT_MODE || 'penalty' }
+          );
+          send('row', {
+            url,
+            name: partner.target?.name || url,
+            fit_score: score.fit_score,
+            verdict: score.verdict,
+            readiness_score: score.readiness_score ?? null,
+            gate_passed: score.fit_score >= GATE_THRESHOLD,
+            conflict: !!(score.channel_conflict && score.channel_conflict.direct_competitor),
+            top_green: (score.green_flags || [])[0] || null,
+            top_red: (score.red_flags || [])[0] || null,
+          });
+        } catch (err) {
+          send('row', { url, name: url, error: err.message });
+        }
+        send('progress', { done: ++done, total: cleaned.length });
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, cleaned.length) }, worker));
+    send('done', { total: cleaned.length, gate_threshold: GATE_THRESHOLD });
+    clearInterval(keepAlive); res.end();
+  } catch (err) {
+    console.error('[recruit-batch]', err.message);
+    send('error', { error: err.message });
+    clearInterval(keepAlive); res.end();
+  }
+});
+
 // ─── OUTREACH KIT (on strategy selection) ────────────────────────────────────
 app.post('/api/recruit-outreach', async (req, res) => {
   const { run_id, strategy_id } = req.body || {};

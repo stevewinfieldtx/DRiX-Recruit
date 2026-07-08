@@ -468,4 +468,118 @@ function escapeHtml(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, (
 function cap(s) { return String(s || '').charAt(0).toUpperCase() + String(s || '').slice(1); }
 function prettyName(s) { return String(s || '').replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()); }
 
+// ─── MODE TOGGLE (single vs batch) ───────────────────────────────────────────
+function setMode(mode) {
+  const batch = mode === 'batch';
+  $('modeSingle').classList.toggle('active', !batch);
+  $('modeBatch').classList.toggle('active', batch);
+  $('singlePane').hidden = batch;
+  $('batchPane').hidden = !batch;
+}
+$('modeSingle').addEventListener('click', () => setMode('single'));
+$('modeBatch').addEventListener('click', () => setMode('batch'));
+
+// ─── BATCH QUICK-PULL ────────────────────────────────────────────────────────
+function extractUrls(text) {
+  const matches = String(text || '').match(/https?:\/\/[^\s,"'<>)\]]+/gi) || [];
+  return [...new Set(matches.map((u) => u.replace(/[.,;]+$/, '')))];
+}
+
+$('csvBtn').addEventListener('click', () => $('csvInput').click());
+$('csvInput').addEventListener('change', async () => {
+  const file = $('csvInput').files[0];
+  if (!file) return;
+  const urls = extractUrls(await file.text());
+  const existing = $('partnerList').value.trim();
+  $('partnerList').value = (existing ? existing + '\n' : '') + urls.join('\n');
+  $('csvNote').textContent = `+${urls.length} from ${file.name}`;
+  $('csvInput').value = '';
+});
+
+const batchRows = [];
+$('batchBtn').addEventListener('click', runBatch);
+
+async function runBatch() {
+  const vendor_url = $('vendorUrl').value.trim();
+  const product_url = $('productUrl').value.trim();
+  const partner_urls = extractUrls($('partnerList').value);
+  if (!vendor_url || !product_url) { alert('Enter the Vendor and Product URLs.'); return; }
+  if (!partner_urls.length) { alert('Add at least one partner URL (one per line).'); return; }
+
+  batchRows.length = 0;
+  $('batchCard').hidden = false;
+  $('batchRows').innerHTML = '';
+  $('batchStatus').innerHTML = '<span class="spin"></span> Starting…';
+  $('batchBtn').disabled = true;
+
+  try {
+    const res = await fetch('/api/recruit-batch', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+      body: JSON.stringify({ vendor_url, product_url, partner_urls, docs_vendor: state.docs.vendor }),
+    });
+    if (!res.ok || !res.body) { const d = await res.json().catch(() => ({})); throw new Error(d.error || `HTTP ${res.status}`); }
+    await readSSE(res.body, handleBatchEvent);
+  } catch (e) {
+    $('batchStatus').innerHTML = `<span style="color:var(--bad)">Error: ${escapeHtml(e.message)}</span>`;
+  } finally {
+    $('batchBtn').disabled = false;
+  }
+}
+
+function handleBatchEvent(event, data) {
+  switch (event) {
+    case 'start':
+      $('batchStatus').innerHTML = `<span class="spin"></span> Scoring 0/${data.total}…`;
+      break;
+    case 'row':
+      batchRows.push(data);
+      renderBatch();
+      break;
+    case 'progress':
+      $('batchStatus').innerHTML = `<span class="spin"></span> Scored ${data.done}/${data.total}…`;
+      break;
+    case 'done':
+      $('batchStatus').textContent = `Done — ${batchRows.length} partners scored, ranked by fit. Deep-dive the winners.`;
+      renderBatch();
+      break;
+    case 'error':
+      $('batchStatus').innerHTML = `<span style="color:var(--bad)">Error: ${escapeHtml(data.error)}</span>`;
+      break;
+  }
+}
+
+function renderBatch() {
+  const rows = [...batchRows].sort((a, b) => (b.fit_score ?? -1) - (a.fit_score ?? -1));
+  $('batchRows').innerHTML = rows.map((r, i) => {
+    if (r.error) {
+      return `<tr class="batch-err"><td>${i + 1}</td><td>${escapeHtml(r.name || r.url)}</td><td>—</td><td colspan="2">Failed: ${escapeHtml(r.error)}</td><td></td></tr>`;
+    }
+    const col = scoreColor(r.fit_score);
+    const notes = [
+      r.gate_passed ? '' : 'below gate',
+      r.conflict ? '⚠ conflict' : '',
+      r.readiness_score != null ? `readiness ${r.readiness_score}` : '',
+    ].filter(Boolean).join(' · ');
+    return `<tr>
+      <td>${i + 1}</td>
+      <td><a href="${escapeHtml(r.url)}" target="_blank" rel="noopener">${escapeHtml(r.name || r.url)}</a></td>
+      <td><b style="color:${col}">${r.fit_score}</b></td>
+      <td>${escapeHtml(r.verdict || '')}</td>
+      <td class="sub">${escapeHtml(notes)}${r.top_green ? `<div class="evi">+ ${escapeHtml(r.top_green)}</div>` : ''}${r.top_red ? `<div class="evi">- ${escapeHtml(r.top_red)}</div>` : ''}</td>
+      <td><button class="secondary batch-open" data-url="${escapeHtml(r.url)}">Deep-dive →</button></td>
+    </tr>`;
+  }).join('');
+  $('batchRows').querySelectorAll('.batch-open').forEach((b) => {
+    b.addEventListener('click', () => openFromBatch(b.dataset.url));
+  });
+}
+
+function openFromBatch(url) {
+  setMode('single');
+  $('partnerUrl').value = url;
+  $('batchCard').hidden = true;
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+  runFlow(false);
+}
+
 boot();
