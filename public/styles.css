@@ -42,11 +42,11 @@ h2 { font-size: 20px; margin: 0 0 4px; }
 .field { display: block; margin-bottom: 14px; }
 .field > span { display: block; font-size: 13px; font-weight: 600; margin-bottom: 6px; }
 .field > span em { color: var(--muted); font-weight: 400; font-style: normal; }
-.field input, .chatform input, .authform input {
+.field input, .field select, .chatform input, .authform input {
   width: 100%; padding: 12px 14px; border-radius: 10px; border: 1px solid var(--line);
   background: var(--card2); color: var(--text); font-size: 14px;
 }
-.field input:focus { outline: none; border-color: var(--brand); }
+.field input:focus, .field select:focus { outline: none; border-color: var(--brand); }
 
 .uploads { margin: -6px 0 16px; }
 .upload-btn { background: none; border: 1px dashed var(--line); color: var(--muted); border-radius: 10px; padding: 8px 12px; cursor: pointer; font-size: 13px; }

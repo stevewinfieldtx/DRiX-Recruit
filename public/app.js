@@ -105,11 +105,18 @@ async function runFlow(override) {
   $('phaseLabel').innerHTML = '<span class="spin"></span> Starting…';
   $('runBtn').disabled = true;
 
+  // Optional calibration context — empty ("Auto") sends nothing and the brain
+  // infers the archetype from the atoms, exactly as before.
+  const partner_persona = $('partnerPersona') ? $('partnerPersona').value : '';
+  const customer_environment = $('customerEnvironment') ? $('customerEnvironment').value : '';
+
   const body = {
     vendor_url, product_url, partner_url,
     docs_vendor: state.docs.vendor,
     docs_partner: state.docs.partner,
     override: !!override,
+    ...(partner_persona ? { partner_persona } : {}),
+    ...(customer_environment ? { customer_environment } : {}),
   };
 
   try {

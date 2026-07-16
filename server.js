@@ -253,6 +253,8 @@ app.post('/api/recruit-flow', async (req, res) => {
     vendor_url, product_url, partner_url,
     docs_vendor, docs_partner,
     override, // if true, generate strategies even when the score is below the gate
+    partner_persona,      // optional archetype (MSSP/MSP/VAR/VSSP/ISV/Consultant) → brain calibration pack
+    customer_environment, // optional end-customer base (SMB/Small Enterprise/Mid-Market) → brain calibration pack
   } = req.body || {};
 
   if (!vendor_url)  return res.status(400).json({ error: 'Require vendor_url' });
@@ -271,7 +273,13 @@ app.post('/api/recruit-flow', async (req, res) => {
   const send = (event, data) => { try { res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } catch {} };
 
   const run_id = newRunId();
-  const inputs = { email: email || req.userEmail || null, vendor_url, product_url, partner_url };
+  // Calibration context rides along in inputs so it persists with the run and
+  // rehydrated runs reuse it (outreach endpoint reads run.partner_persona).
+  const calibration = {
+    ...(partner_persona ? { partner_persona } : {}),
+    ...(customer_environment ? { customer_environment } : {}),
+  };
+  const inputs = { email: email || req.userEmail || null, vendor_url, product_url, partner_url, ...calibration };
 
   try {
     // 1) Ingest the three entities.
@@ -293,6 +301,7 @@ app.post('/api/recruit-flow', async (req, res) => {
       vendor:  { name: vendor.target?.name,  summary: vendor.summary,  atoms: vendor.atoms },
       product: { name: product.target?.name, summary: product.summary, atoms: product.atoms },
       partner: { name: partner.target?.name, summary: partner.summary, atoms: partner.atoms },
+      ...calibration,
     };
     // Shared brain lens: 8 weighted FIT dims + separate READINESS axis + code-side
     // channel-conflict adjustment. fit_score comes back already clamped/computed.
@@ -334,6 +343,7 @@ app.post('/api/recruit-flow', async (req, res) => {
       product: { name: product.target?.name, summary: product.summary, atoms: product.atoms },
       partner: { name: partner.target?.name, summary: partner.summary, atoms: partner.atoms },
       fit: score,
+      ...calibration,
     });
     send('strategies', strategies);
 
@@ -663,13 +673,17 @@ app.post('/api/recruit-outreach', async (req, res) => {
   if (!chosen) return res.status(400).json({ error: 'Require a valid strategy_id' });
 
   try {
-    const input = JSON.stringify({
+    // Plain object (not pre-stringified) so the brain sees partner_persona /
+    // customer_environment and appends its calibration packs to the prompt.
+    const input = {
       vendor:  { name: run.vendor?.target?.name,  summary: run.vendor?.summary,  atoms: run.vendor?.atoms },
       product: { name: run.product?.target?.name, summary: run.product?.summary, atoms: run.product?.atoms },
       partner: { name: run.partner?.target?.name, summary: run.partner?.summary, atoms: run.partner?.atoms },
       fit: run.score,
       chosen_strategy: chosen,
-    });
+      ...(run.partner_persona ? { partner_persona: run.partner_persona } : {}),
+      ...(run.customer_environment ? { customer_environment: run.customer_environment } : {}),
+    };
     const outreach = await recruitIntel.generateOutreach(input, { maxTokens: 6000, temperature: 0.5 });
 
     // Singular slots stay (last-write) for back-compat; the maps accumulate one

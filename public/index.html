@@ -59,6 +59,29 @@
           <span>Partner URL <em>the reseller you're evaluating</em></span>
           <input id="partnerUrl" type="url" placeholder="https://reseller.com" />
         </label>
+        <div class="field-row" style="display:flex;gap:12px;">
+          <label class="field" style="flex:1;">
+            <span>Partner type <em>calibrates scoring + messaging to the archetype</em></span>
+            <select id="partnerPersona">
+              <option value="">Auto (infer from site)</option>
+              <option value="MSP">MSP</option>
+              <option value="MSSP">MSSP</option>
+              <option value="VAR">VAR</option>
+              <option value="VSSP">VSSP (micro / solo shop)</option>
+              <option value="ISV">ISV</option>
+              <option value="Consultant">Consultant / Advisory</option>
+            </select>
+          </label>
+          <label class="field" style="flex:1;">
+            <span>Their customers <em>the end-customer base the product targets</em></span>
+            <select id="customerEnvironment">
+              <option value="">Auto (infer from site)</option>
+              <option value="SMB">SMB</option>
+              <option value="Mid-Market">Mid-Market</option>
+              <option value="Small Enterprise">Small Enterprise</option>
+            </select>
+          </label>
+        </div>
         <div class="uploads" id="partnerDocs" data-bucket="partner">
           <button type="button" class="upload-btn">+ Add partner material (PDF / Word / PPTX / TXT)</button>
           <input type="file" accept=".pdf,.docx,.pptx,.txt" multiple hidden />
