@@ -672,8 +672,12 @@ app.post('/api/recruit-outreach', async (req, res) => {
     });
     const outreach = await recruitIntel.generateOutreach(input, { maxTokens: 6000, temperature: 0.5 });
 
+    // Singular slots stay (last-write) for back-compat; the maps accumulate one
+    // entry per strategy so multi-select outreach kits coexist (up to 5).
     run.chosen_strategy = chosen;
     run.outreach = outreach;
+    run.chosen_strategies = { ...(run.chosen_strategies || {}), [chosen.id]: chosen };
+    run.outreaches        = { ...(run.outreaches || {}),        [chosen.id]: outreach };
     runStore.set(run_id, run);
     db.saveOutreach(run_id, chosen.id, chosen.title || '', outreach).catch(e => console.error('[db] saveOutreach:', e.message));
 

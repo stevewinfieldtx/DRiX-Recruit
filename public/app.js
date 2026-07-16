@@ -34,7 +34,15 @@ async function renderSavedRun(run_id) {
     if (run.score) renderScore(run.score);
     if (run.pains) renderPains({ pains: run.pains });
     if (run.strategies) renderStrategies(run.strategies);
-    if (run.outreach) { $('outreachCard').hidden = false; renderOutreach(run.outreach, run.chosen_strategy); }
+    // Multi-select runs carry run.outreaches (one kit per strategy); older
+    // saved runs only have the singular run.outreach.
+    const kits = run.outreaches && Object.keys(run.outreaches).length
+      ? Object.keys(run.outreaches).map((sid) => ({
+          o: run.outreaches[sid],
+          cs: (run.chosen_strategies || {})[sid] || (run.strategies?.strategies || []).find((s) => s.id === sid) || { id: sid, title: sid },
+        }))
+      : (run.outreach ? [{ o: run.outreach, cs: run.chosen_strategy }] : []);
+    for (const { o, cs } of kits) renderOutreach(o, cs, outreachPanel(cs?.id || 'chosen'));
     $('toolsCard').hidden = false; wireTools();
     $('coachCard').hidden = false;
   } catch (e) {
@@ -351,11 +359,30 @@ function renderSignals(sg) {
 }
 
 // ─── SELECT STRATEGY → OUTREACH ──────────────────────────────────────────────
+// Multi-select: each strategy gets its OWN stacked panel inside #outreachCard
+// (up to 5). Selecting several in a row fires the kits in parallel — the swarm.
+const MAX_OUTREACH = 5;
+function outreachPanel(strategy_id) {
+  const card = $('outreachCard');
+  card.hidden = false;
+  let panel = card.querySelector(`[data-sid="${CSS.escape(strategy_id)}"]`);
+  if (!panel) {
+    panel = document.createElement('div');
+    panel.dataset.sid = strategy_id;
+    card.appendChild(panel);
+  }
+  return panel;
+}
 async function selectStrategy(strategy_id) {
   if (!state.runId) { alert('Run not ready yet.'); return; }
   const card = $('outreachCard');
-  card.hidden = false;
-  card.innerHTML = '<div class="phase"><span class="spin"></span> Building the outreach kit…</div>';
+  const existing = [...card.querySelectorAll('[data-sid]')].map((el) => el.dataset.sid);
+  if (!existing.includes(strategy_id) && existing.length >= MAX_OUTREACH) {
+    alert(`Max ${MAX_OUTREACH} strategies — you already have ${MAX_OUTREACH} outreach kits.`);
+    return;
+  }
+  const panel = outreachPanel(strategy_id);
+  panel.innerHTML = '<div class="phase"><span class="spin"></span> Building the outreach kit…</div>';
   try {
     const r = await fetch('/api/recruit-outreach', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
@@ -363,19 +390,22 @@ async function selectStrategy(strategy_id) {
     });
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || 'failed');
-    renderOutreach(d.outreach, d.chosen_strategy);
+    renderOutreach(d.outreach, d.chosen_strategy, panel);
+    const btn = $('stratList')?.querySelector(`button[data-sid="${CSS.escape(strategy_id)}"]`);
+    if (btn) btn.textContent = '✓ Outreach built — rebuild';
     $('coachCard').hidden = false;
   } catch (e) {
-    card.innerHTML = `<div class="err-banner">Outreach failed: ${escapeHtml(e.message)}</div>`;
+    panel.innerHTML = `<div class="err-banner">Outreach failed: ${escapeHtml(e.message)}</div>`;
   }
 }
 
-function renderOutreach(o, chosen) {
+function renderOutreach(o, chosen, panel) {
+  panel = panel || outreachPanel(chosen?.id || 'chosen');
   const ep = o.entry_point || {};
   const q = o.questions || [];
   const emails = o.email_drip || [];
   const calls = o.phone_scripts || [];
-  $('outreachCard').innerHTML = `
+  panel.innerHTML = `
     <h2>Outreach kit</h2>
     <p class="sub">Strategy: <b>${escapeHtml(chosen?.title || '')}</b></p>
 
@@ -423,7 +453,7 @@ function renderOutreach(o, chosen) {
         </div>`).join('')}
     </div>`;
 
-  $('outreachCard').querySelectorAll('.copybtn').forEach((b) => {
+  panel.querySelectorAll('.copybtn').forEach((b) => {
     b.addEventListener('click', () => { navigator.clipboard.writeText(decodeURIComponent(b.dataset.copy)); b.textContent = 'Copied'; setTimeout(() => (b.textContent = 'Copy'), 1200); });
   });
 }

@@ -286,7 +286,34 @@ async function getRunFull(runId) {
   if (!row) return null;
   const { full_result, ...rest } = row;
   const fr = typeof full_result === 'string' ? (JSON.parse(full_result) || {}) : (full_result || {});
-  return { ...rest, ...fr, run_id: row.id, created_at: row.created_at };
+  const run = { ...rest, ...fr, run_id: row.id, created_at: row.created_at };
+
+  // Rebuild the multi-strategy outreach map from the normalized recruit_outreach
+  // rows (one per selection, latest wins per strategy). full_result only holds
+  // the LAST kit; this restores all of them for saved-run (?run=) replays.
+  try {
+    const o = await p.query(`
+      SELECT DISTINCT ON (strategy_id) strategy_id, outreach
+      FROM recruit_outreach WHERE run_id = $1
+      ORDER BY strategy_id, created_at DESC
+    `, [runId]);
+    if (o.rows.length) {
+      run.outreaches = run.outreaches || {};
+      run.chosen_strategies = run.chosen_strategies || {};
+      const strats = run.strategies?.strategies || [];
+      for (const r of o.rows) {
+        const sid = r.strategy_id;
+        if (!sid) continue;
+        run.outreaches[sid] = typeof r.outreach === 'string' ? JSON.parse(r.outreach) : r.outreach;
+        run.chosen_strategies[sid] = run.chosen_strategies[sid]
+          || strats.find(s => s.id === sid)
+          || { id: sid, title: sid };
+      }
+    }
+  } catch (err) {
+    console.error('[db] getRunFull outreach rebuild failed:', err.message);
+  }
+  return run;
 }
 
 function isConfigured() { return Boolean(DATABASE_URL); }
